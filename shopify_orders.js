@@ -54,7 +54,13 @@ const D30_AGO_ISO = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(
 // Picks the LONGEST (most specific) Shopify SKU that is a part-prefix of the sheet SKU.
 
 function skuParts(sku) {
-  return sku.toUpperCase().replace(/[\(\)\[\]\/\+\.]/g, "").split(/[-\s]+/).filter(Boolean);
+  return sku
+    .toUpperCase()
+    .replace(/[\(\)\[\]\/\+\.,:;]/g, "")  // strip special chars (incl. comma, colon, semicolon)
+    .replace(/\s*-\s*/g, "-")              // normalise spaces around dashes before splitting
+    .split(/[-\s]+/)
+    .map(p => p.replace(/[^A-Z0-9]/g, "")) // strip any leftover non-alphanumeric per part
+    .filter(Boolean);
 }
 
 /**
@@ -266,9 +272,17 @@ function shopifyGet(path, params = "") {
   );
 }
 
-// Normalize SKU for consistent matching — uppercase + collapse whitespace
+// Normalize SKU for consistent matching.
+// Handles: trailing/leading spaces, spaces around dashes ("SB- PERF" → "SB-PERF"),
+//          trailing dots ("SB-142-GWP." → "SB-142-GWP"), collapsed internal spaces.
 function normalizeSKU(sku) {
-  return (sku ?? "").trim().toUpperCase().replace(/\s+/g, " ");
+  return (sku ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s*-\s*/g, "-")   // "SB- PERF" → "SB-PERF", "SB -CB153" → "SB-CB153"
+    .replace(/\s+/g, " ")        // collapse any remaining multi-spaces
+    .replace(/\.+$/, "")         // strip trailing dots: "SB-142-GWP." → "SB-142-GWP"
+    .trim();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

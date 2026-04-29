@@ -770,7 +770,7 @@ async function markNpdFlags(token, skuRows, npdSkus) {
       writeData.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]] });
       setTo1++;
     } else if (!isNpd && current === 1) {
-      writeData.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[0]] });
+      writeData.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[""]] });
       setTo0++;
     } else {
       unchanged++;
@@ -778,7 +778,7 @@ async function markNpdFlags(token, skuRows, npdSkus) {
   }
 
   console.log(`  → Set to 1 (new NPD)     : ${setTo1}`);
-  console.log(`  → Set to 0 (removed NPD) : ${setTo0}`);
+  console.log(`  → Cleared (removed NPD)  : ${setTo0}`);
   console.log(`  → Unchanged              : ${unchanged}`);
 
   if (writeData.length === 0) { console.log("  ✓ All flags already in sync."); return; }
@@ -792,7 +792,7 @@ async function markNpdFlags(token, skuRows, npdSkus) {
     )
   );
   if (res.statusCode !== 200) throw new Error(`NPD flag write error ${res.statusCode}: ${res.body.replace(/\s+/g, " ")}`);
-  console.log(`  ✓ NPD flags synced — ${setTo1} set to 1, ${setTo0} reset to 0`);
+  console.log(`  ✓ NPD flags synced — ${setTo1} set to 1, ${setTo0} cleared to blank`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

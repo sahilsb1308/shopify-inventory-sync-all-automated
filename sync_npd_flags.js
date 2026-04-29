@@ -176,7 +176,7 @@ async function main() {
       setTo1++;
     } else if (!isNpd && current === 1) {
       // Was NPD but no longer in sheet → set 0
-      toWrite.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[0]] });
+      toWrite.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[""]] });
       if (DRY_RUN) console.log(`  [DRY RUN] ${sku} → 0 (removed from NPD)`);
       setTo0++;
     } else {
@@ -185,7 +185,7 @@ async function main() {
   }
 
   console.log(`  → Set to 1 (new NPD)     : ${setTo1}`);
-  console.log(`  → Set to 0 (removed NPD) : ${setTo0}`);
+  console.log(`  → Cleared (removed NPD)  : ${setTo0}`);
   console.log(`  → Unchanged              : ${unchanged}`);
 
   if (DRY_RUN) { console.log("\n  DRY RUN complete — no changes written."); return; }

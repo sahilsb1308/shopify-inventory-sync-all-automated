@@ -464,43 +464,57 @@ function findNewUnmatchedSkus(salesMap, skuTranslation) {
 }
 
 /**
- * Appends one new row per unmatched SKU at the bottom of the sheet.
- * Columns written: B (SKU), C (Product Name), G (Stock),
- *                  K (Net Sold), L (OOS Days), N (Revenue)
- * All other columns are left blank so existing formulas/validations aren't broken.
+ * Appends one new row per unmatched SKU directly after the last existing data row.
  *
- * Column index map (0-based, A=0):
- *   B=1  C=2  G=6  K=10  L=11  N=13  → row array length = 14
+ * Uses an explicit range (e.g. "Inventory Dashboard!B1209:N1215") so there is
+ * zero ambiguity about which column the data lands in — no table-detection
+ * guesswork from the Sheets API.
+ *
+ * Column layout written (0-based index inside the B…N window):
+ *   B=0  C=1  D=2  E=3  F=4  G=5  H=6  I=7  J=8  K=9  L=10  M=11  N=12
+ *   SKU  Name  -    -    -   Stock  -    -    -  Sold  OOS   -    Revenue
  */
-async function appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap) {
+async function appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap, lastExistingRow) {
   if (newSkus.length === 0) return;
 
-  const ROW_LEN = 14; // A … N
+  // B through N = 13 columns (indices 0–12)
+  const ROW_LEN = 13;
+
   const rows = newSkus.map((sku) => {
     const sales = salesMap[sku];
     const stock = stockMap[sku] ?? 0;
     const name  = productNameMap[sku] || sales?.productTitle || "";
     const row   = new Array(ROW_LEN).fill("");
-    row[1]  = sku;                                               // B – SKU
-    row[2]  = name;                                              // C – Product Name
-    row[6]  = stock;                                             // G – Current Stock
-    row[10] = sales?.net_items_sold ?? 0;                        // K – Net Items Sold
-    row[11] = sales?.oos_days        ?? 30;                      // L – OOS Days
-    row[13] = parseFloat((sales?.gross_sales ?? 0).toFixed(2));  // N – Revenue (30D)
+
+    row[0]  = sku;                                                // B – SKU
+    row[1]  = name;                                               // C – Product Name
+    // D, E, F left blank (indices 2,3,4)
+    row[5]  = stock;                                              // G – Current Stock
+    // H, I, J left blank (indices 6,7,8)
+    row[9]  = sales?.net_items_sold ?? 0;                         // K – Net Items Sold
+    row[10] = sales?.oos_days        ?? 30;                       // L – OOS Days
+    // M left blank (index 11)
+    row[12] = parseFloat((sales?.gross_sales ?? 0).toFixed(2));   // N – Revenue (30D)
     return row;
   });
 
-  const range = `${SHEET_TAB}!A:N`;
-  const url   = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
+  // Write starting at the row immediately after the last existing SKU row
+  const startRow = lastExistingRow + 1;
+  const endRow   = startRow + newSkus.length - 1;
+  const range    = `${SHEET_TAB}!B${startRow}:N${endRow}`;
 
   const res = await withRetry(() =>
-    httpsRequest("POST", url, JSON.stringify({ values: rows }),
-      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" })
+    httpsRequest(
+      "PUT",
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
+      JSON.stringify({ range, majorDimension: "ROWS", values: rows }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    )
   );
 
   if (res.statusCode !== 200) throw new Error(`Sheets append error ${res.statusCode}: ${res.body}`);
 
-  console.log(`\n✓ Appended ${newSkus.length} new product row(s) (sold in last 3 days, not in sheet):`);
+  console.log(`\n✓ Appended ${newSkus.length} new product row(s) starting at row ${startRow}:`);
   newSkus.forEach((sku) => {
     const name = productNameMap[sku] || salesMap[sku]?.productTitle || "";
     console.log(`  + ${sku}${name ? `  →  ${name}` : ""}`);
@@ -687,7 +701,8 @@ async function main() {
   console.log("\n[6/6] Checking for new products sold in last 30 days...");
   const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation);
   console.log(`  ${newSkus.length === 0 ? "✓ No new unmatched products found." : `⚡ ${newSkus.length} new SKU(s) to append`}`);
-  if (!DRY_RUN) await appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap);
+  const lastRow = skuRows[skuRows.length - 1].row;
+  if (!DRY_RUN) await appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap, lastRow);
 
   console.log("\n" + "═".repeat(58));
   console.log("  Done. Columns G/K/L/N updated; new SKUs appended.");

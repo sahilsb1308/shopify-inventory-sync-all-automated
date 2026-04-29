@@ -742,41 +742,46 @@ async function fetchNpdSkus(token) {
 }
 
 /**
- * For every row in the inventory dashboard whose SKU is in npdSkus,
- * writes 1 to column AE (NPD flag) if it isn't already 1.
+ * Full two-way sync of NPD flags:
+ * - SKU in npdSkus but AE != 1  → set 1
+ * - SKU not in npdSkus but AE=1 → set 0 (product graduated out of NPD)
  */
 async function markNpdFlags(token, skuRows, npdSkus) {
   if (npdSkus.size === 0) { console.log("  No NPD SKUs found — nothing to mark."); return; }
 
-  // Build list of rows that need AE = 1
-  const toMark = [];
-  for (const { row, sku } of skuRows) {
-    if (npdSkus.has(normalizeSKU(sku))) toMark.push(row);
-  }
-  if (toMark.length === 0) { console.log("  No matching rows found in dashboard."); return; }
-
-  // Read current AE values so we only write where it isn't already 1
-  const firstRow = toMark[0];
-  const lastRow  = toMark[toMark.length - 1];
-  const readRange = encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${firstRow}:${NPD_FLAG_COL}${lastRow}`);
-  const readRes  = await withRetry(() =>
+  // Read current AE values for all rows
+  const lastRow   = skuRows[skuRows.length - 1].row;
+  const readRange = encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`);
+  const readRes   = await withRetry(() =>
     httpsGet(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${readRange}`,
       { Authorization: `Bearer ${token}` })
   );
   const existing = JSON.parse(readRes.body).values ?? [];
 
-  // Filter to only rows where AE is blank or not "1"
   const writeData = [];
-  for (const row of toMark) {
-    const idx     = row - firstRow;
-    const current = (existing[idx]?.[0] ?? "").toString().trim();
-    if (current !== "1" && current !== 1) writeData.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]] });
+  let setTo1 = 0, setTo0 = 0, unchanged = 0;
+
+  for (const { row, sku } of skuRows) {
+    const idx        = row - DATA_START_ROW;
+    const current    = parseFloat((existing[idx]?.[0] ?? "").toString().trim()) || 0;
+    const isNpd      = npdSkus.has(normalizeSKU(sku));
+
+    if (isNpd && current !== 1) {
+      writeData.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]] });
+      setTo1++;
+    } else if (!isNpd && current === 1) {
+      writeData.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[0]] });
+      setTo0++;
+    } else {
+      unchanged++;
+    }
   }
 
-  if (writeData.length === 0) {
-    console.log(`  ✓ All ${toMark.length} matched rows already have NPD flag = 1`);
-    return;
-  }
+  console.log(`  → Set to 1 (new NPD)     : ${setTo1}`);
+  console.log(`  → Set to 0 (removed NPD) : ${setTo0}`);
+  console.log(`  → Unchanged              : ${unchanged}`);
+
+  if (writeData.length === 0) { console.log("  ✓ All flags already in sync."); return; }
 
   const res = await withRetry(() =>
     httpsRequest(
@@ -787,8 +792,7 @@ async function markNpdFlags(token, skuRows, npdSkus) {
     )
   );
   if (res.statusCode !== 200) throw new Error(`NPD flag write error ${res.statusCode}: ${res.body.replace(/\s+/g, " ")}`);
-  console.log(`  ✓ Marked ${writeData.length} rows with NPD flag = 1 in col ${NPD_FLAG_COL}`);
-  console.log(`    (${toMark.length - writeData.length} were already marked)`);
+  console.log(`  ✓ NPD flags synced — ${setTo1} set to 1, ${setTo0} reset to 0`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

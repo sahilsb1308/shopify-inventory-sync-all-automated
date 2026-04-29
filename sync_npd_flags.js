@@ -138,8 +138,8 @@ async function main() {
   console.log(`  Total unique NPD SKUs: ${npdSkus.size}`);
   if (npdSkus.size === 0) { console.log("  Nothing to do."); return; }
 
-  // 3. Read inventory dashboard column B (SKUs)
-  console.log("\n[3/3] Reading Inventory Dashboard and marking NPD flags...");
+  // 3. Read inventory dashboard columns B (SKU) and AE (current flag)
+  console.log("\n[3/3] Syncing NPD flags in Inventory Dashboard...");
   const skuRange = encodeURIComponent(`${SHEET_TAB}!${SKU_COL}${DATA_START_ROW}:${SKU_COL}`);
   const skuRes   = await httpsGet(
     `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${skuRange}`,
@@ -151,30 +151,45 @@ async function main() {
     .filter(r => r.sku.trim() !== "");
   console.log(`  ${skuRows.length} SKU rows found in dashboard`);
 
-  // Find matching rows
-  const matchedRows = skuRows.filter(r => npdSkus.has(normalizeSKU(r.sku)));
-  console.log(`  ${matchedRows.length} rows match NPD SKUs`);
-
-  if (matchedRows.length === 0) { console.log("  No matches — nothing to write."); return; }
-
-  // Always overwrite all matched rows with numeric 1 (fixes text '1 → number 1)
-  const toWrite = matchedRows.map(({ row }) => ({
-    range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]]
-  }));
-  if (DRY_RUN) matchedRows.forEach(({ row, sku }) =>
-    console.log(`  [DRY RUN] Would set AE${row} = 1  ← ${sku}`)
+  // Read current AE values for all rows
+  const lastRow  = skuRows[skuRows.length - 1].row;
+  const aeRange  = encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`);
+  const aeRes    = await httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${aeRange}`,
+    { Authorization: `Bearer ${token}` }
   );
-  console.log(`  To be written:  ${toWrite.length}`);
+  const aeValues = JSON.parse(aeRes.body).values ?? [];
 
-  if (DRY_RUN) {
-    console.log("\n  DRY RUN complete — no changes written.");
-    return;
+  const toWrite = [];
+  let setTo1 = 0, setTo0 = 0, unchanged = 0;
+
+  for (const { row, sku } of skuRows) {
+    const idx        = row - DATA_START_ROW;
+    const currentRaw = (aeValues[idx]?.[0] ?? "").toString().trim();
+    const current    = parseFloat(currentRaw) || 0;
+    const isNpd      = npdSkus.has(normalizeSKU(sku));
+
+    if (isNpd && current !== 1) {
+      // In NPD sheet but not marked → set 1
+      toWrite.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]] });
+      if (DRY_RUN) console.log(`  [DRY RUN] ${sku} → 1 (added to NPD)`);
+      setTo1++;
+    } else if (!isNpd && current === 1) {
+      // Was NPD but no longer in sheet → set 0
+      toWrite.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[0]] });
+      if (DRY_RUN) console.log(`  [DRY RUN] ${sku} → 0 (removed from NPD)`);
+      setTo0++;
+    } else {
+      unchanged++;
+    }
   }
 
-  if (toWrite.length === 0) {
-    console.log("  ✓ All matched rows already have NPD flag = 1");
-    return;
-  }
+  console.log(`  → Set to 1 (new NPD)     : ${setTo1}`);
+  console.log(`  → Set to 0 (removed NPD) : ${setTo0}`);
+  console.log(`  → Unchanged              : ${unchanged}`);
+
+  if (DRY_RUN) { console.log("\n  DRY RUN complete — no changes written."); return; }
+  if (toWrite.length === 0) { console.log("  ✓ All flags already in sync."); return; }
 
   const writeRes = await httpsPost(
     `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
@@ -184,7 +199,7 @@ async function main() {
   if (writeRes.statusCode !== 200)
     throw new Error(`Write failed ${writeRes.statusCode}: ${writeRes.body.replace(/\s+/g, " ")}`);
 
-  console.log(`\n✓ Done — ${toWrite.length} rows marked with NPD flag = 1 in col ${NPD_FLAG_COL}`);
+  console.log(`\n✓ Done — ${setTo1} marked as 1, ${setTo0} reset to 0`);
   console.log("═".repeat(54) + "\n");
 }
 

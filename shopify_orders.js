@@ -44,7 +44,7 @@ const NPD_FLAG_COL         = "AE";  // Column in Inventory Dashboard to mark NPD
 const NPD_SHEET_ID  = "1Ubwo5ElTn4AH1zIWqZUOsjhvo-SZ_t_i2dZkCLOaKHw";
 const NPD_TABS      = [
   { name: "SB",                   skuCol: "D" },
-  { name: "Select",               skuCol: "C" },
+  { name: "Select ",               skuCol: "C" },
   { name: "Craze",                skuCol: "D" },
   { name: "Skincare & Fragrance", skuCol: "D" },
 ];

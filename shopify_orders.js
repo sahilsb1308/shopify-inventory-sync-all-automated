@@ -37,6 +37,7 @@ const PAGE_LIMIT           = 250;
 const SERVICE_ACCOUNT_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "service_account.json";
 const SHEET_ID             = "1Y2EaDjGfMwscmpn9h7oR_mTOSVxErqWHeowftX01KdI";
 const SHEET_TAB            = "Inventory Dashboard";
+const SHEET_GID            = 2027363264;   // numeric gid of "Inventory Dashboard" tab
 const SKU_COL              = "B";
 const STOCK_COL            = "G";   // Ending Inventory Units
 const UNITS_COL            = "K";   // Net Items Sold
@@ -477,42 +478,82 @@ function findNewUnmatchedSkus(salesMap, skuTranslation) {
 async function appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap, lastExistingRow) {
   if (newSkus.length === 0) return;
 
-  // B through N = 13 columns (indices 0–12)
-  const ROW_LEN = 13;
+  const startRow = lastExistingRow + 1;
 
-  const rows = newSkus.map((sku) => {
+  // Build one data array per column (same pattern as writeToSheet which works reliably)
+  // We write only the columns we own: B, C, G, K, L, N
+  // Each column gets its own range + values array in the batchUpdate call.
+  const colB = [], colC = [], colG = [], colK = [], colL = [], colN = [];
+
+  newSkus.forEach((sku) => {
     const sales = salesMap[sku];
     const stock = stockMap[sku] ?? 0;
     const name  = productNameMap[sku] || sales?.productTitle || "";
-    const row   = new Array(ROW_LEN).fill("");
-
-    row[0]  = sku;                                                // B – SKU
-    row[1]  = name;                                               // C – Product Name
-    // D, E, F left blank (indices 2,3,4)
-    row[5]  = stock;                                              // G – Current Stock
-    // H, I, J left blank (indices 6,7,8)
-    row[9]  = sales?.net_items_sold ?? 0;                         // K – Net Items Sold
-    row[10] = sales?.oos_days        ?? 30;                       // L – OOS Days
-    // M left blank (index 11)
-    row[12] = parseFloat((sales?.gross_sales ?? 0).toFixed(2));   // N – Revenue (30D)
-    return row;
+    colB.push([sku]);
+    colC.push([name]);
+    colG.push([stock]);
+    colK.push([sales?.net_items_sold ?? 0]);
+    colL.push([sales?.oos_days        ?? 30]);
+    colN.push([parseFloat((sales?.gross_sales ?? 0).toFixed(2))]);
   });
 
-  // Write starting at the row immediately after the last existing SKU row
-  const startRow = lastExistingRow + 1;
-  const endRow   = startRow + newSkus.length - 1;
-  const range    = `${SHEET_TAB}!B${startRow}:N${endRow}`;
+  const endRow = startRow + newSkus.length - 1;
 
-  const res = await withRetry(() =>
+  // Validate: catch any non-string/number values that would cause a 400
+  colB.forEach(([v], i) => { if (typeof v !== "string") console.warn(`  ⚠ colB[${i}] not a string:`, v); });
+  colG.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ colG[${i}] not a number:`, v); });
+  colK.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ colK[${i}] not a number:`, v); });
+  colL.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ colL[${i}] not a number:`, v); });
+  colN.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ colN[${i}] not a number:`, v); });
+
+  // Log exactly what is being written and where
+  console.log(`\n  Writing ${newSkus.length} new rows:`);
+  console.log(`    B${startRow}:B${endRow}  → SKU`);
+  console.log(`    C${startRow}:C${endRow}  → Product Name`);
+  console.log(`    G${startRow}:G${endRow}  → Current Stock`);
+  console.log(`    K${startRow}:K${endRow}  → Net Items Sold`);
+  console.log(`    L${startRow}:L${endRow}  → OOS Days`);
+  console.log(`    N${startRow}:N${endRow}  → Revenue`);
+
+  // Extend the sheet grid if needed so rows startRow–endRow exist
+  console.log(`  Extending sheet to at least ${endRow + 50} rows...`);
+  await withRetry(() =>
     httpsRequest(
-      "PUT",
-      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
-      JSON.stringify({ range, majorDimension: "ROWS", values: rows }),
+      "POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
+      JSON.stringify({
+        requests: [{
+          appendDimension: {
+            sheetId:   SHEET_GID,
+            dimension: "ROWS",
+            length:    newSkus.length + 100   // add buffer rows
+          }
+        }]
+      }),
       { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
     )
   );
 
-  if (res.statusCode !== 200) throw new Error(`Sheets append error ${res.statusCode}: ${res.body}`);
+  const res = await withRetry(() =>
+    httpsRequest(
+      "POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
+      JSON.stringify({
+        valueInputOption: "RAW",
+        data: [
+          { range: `${SHEET_TAB}!B${startRow}:B${endRow}`, values: colB },
+          { range: `${SHEET_TAB}!C${startRow}:C${endRow}`, values: colC },
+          { range: `${SHEET_TAB}!G${startRow}:G${endRow}`, values: colG },
+          { range: `${SHEET_TAB}!K${startRow}:K${endRow}`, values: colK },
+          { range: `${SHEET_TAB}!L${startRow}:L${endRow}`, values: colL },
+          { range: `${SHEET_TAB}!N${startRow}:N${endRow}`, values: colN },
+        ]
+      }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    )
+  );
+
+  if (res.statusCode !== 200) throw new Error(`Sheets append error ${res.statusCode}: ${res.body.replace(/\s+/g, " ")}`);
 
   console.log(`\n✓ Appended ${newSkus.length} new product row(s) starting at row ${startRow}:`);
   newSkus.forEach((sku) => {

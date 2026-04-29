@@ -701,7 +701,13 @@ async function main() {
   console.log("\n[6/6] Checking for new products sold in last 30 days...");
   const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation);
   console.log(`  ${newSkus.length === 0 ? "✓ No new unmatched products found." : `⚡ ${newSkus.length} new SKU(s) to append`}`);
-  const lastRow = skuRows[skuRows.length - 1].row;
+  // Re-read the sheet to get the true last row right before appending —
+  // guarantees we always append exactly after the last SKU in column B,
+  // regardless of any changes made during this run.
+  const freshSkuRows = await readSheetSKUs(token);
+  const lastRow      = freshSkuRows[freshSkuRows.length - 1].row;
+  console.log(`  Last occupied row in sheet  : ${lastRow}`);
+  console.log(`  New rows will start at      : ${lastRow + 1}`);
   if (!DRY_RUN) await appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap, lastRow);
 
   console.log("\n" + "═".repeat(58));

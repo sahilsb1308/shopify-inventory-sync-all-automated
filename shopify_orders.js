@@ -431,33 +431,35 @@ async function fetchInventoryReport() {
 }
 
 // ─── New-product detection ───────────────────────────────────────────────────
-// Returns true if the SKU had at least 1 unit sold in the last N calendar days.
-function soldInLastNDays(dailyUnits, n) {
-  for (let i = 0; i < n; i++) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    if ((dailyUnits[key] || 0) > 0) return true;
-  }
-  return false;
-}
-
 /**
- * Finds Shopify SKUs that:
- *  1. Had at least 1 sale in the last 30 days
- *  2. Are NOT already matched to any row in the sheet
- * Returns an array of SKU strings.
+ * Finds every Shopify SKU that:
+ *  1. Appears in salesMap  →  meaning it sold at least once in the last 30 days
+ *     (salesMap is built entirely from orders in the 30-day fetch window,
+ *      so every key in it had sales by definition — no date re-check needed)
+ *  2. Is NOT already covered by any sheet row (exact or fuzzy match)
+ *
+ * These are the products we want to append as new rows so they get
+ * updated on every future run.
  */
 function findNewUnmatchedSkus(salesMap, skuTranslation) {
-  // All Shopify SKUs that are already covered by a sheet row
+  // Build the set of Shopify SKUs already mapped to a sheet row
   const coveredShopifySkus = new Set(Object.values(skuTranslation).filter(Boolean));
 
-  const newSkus = [];
-  for (const [sku, data] of Object.entries(salesMap)) {
-    if (sku.startsWith("NO_SKU__"))   continue;   // skip variants with no SKU
-    if (coveredShopifySkus.has(sku))  continue;   // already in sheet
-    if (soldInLastNDays(data.dailyUnits, 30))  newSkus.push(sku);
+  const newSkus    = [];
+  const skippedLog = [];
+
+  for (const sku of Object.keys(salesMap)) {
+    if (sku.startsWith("NO_SKU__")) continue;            // variant had no SKU in Shopify
+    if (coveredShopifySkus.has(sku)) {
+      skippedLog.push(sku);
+      continue;                                          // already in sheet
+    }
+    newSkus.push(sku);
   }
+
+  console.log(`  Total sold SKUs in last 30D : ${Object.keys(salesMap).length}`);
+  console.log(`  Already matched to sheet    : ${skippedLog.length}`);
+  console.log(`  New (not in sheet)          : ${newSkus.length}`);
   return newSkus;
 }
 

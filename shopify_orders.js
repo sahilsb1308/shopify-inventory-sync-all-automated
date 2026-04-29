@@ -38,6 +38,17 @@ const SERVICE_ACCOUNT_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "service
 const SHEET_ID             = "1Y2EaDjGfMwscmpn9h7oR_mTOSVxErqWHeowftX01KdI";
 const SHEET_TAB            = "Inventory Dashboard";
 // SHEET_GID looked up dynamically in appendNewProductRows — do not hardcode
+const NPD_FLAG_COL         = "AE";  // Column in Inventory Dashboard to mark NPD = 1
+
+// ─── NPD Allocation sheet (separate spreadsheet) ─────────────────────────────
+const NPD_SHEET_ID  = "1XPNGd1JcgdU089g-UlScZcoZmYfGOVAMzRe7i10OBSU";
+const NPD_TABS      = [
+  { name: "SB",                   skuCol: "D" },
+  { name: "Select",               skuCol: "C" },
+  { name: "Craze",                skuCol: "D" },
+  { name: "Skincare & Fragrance", skuCol: "D" },
+];
+
 const SKU_COL              = "B";
 const STOCK_COL            = "G";   // Ending Inventory Units
 const UNITS_COL            = "K";   // Net Items Sold
@@ -700,6 +711,87 @@ async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation =
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// NPD Flag — read NPD allocation sheet and mark column AE = 1 in dashboard
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Reads product codes from all NPD allocation tabs and returns a Set of
+ * normalised SKUs that are in the NPD pipeline.
+ */
+async function fetchNpdSkus(token) {
+  const npdSkus = new Set();
+  for (const { name, skuCol } of NPD_TABS) {
+    const range    = encodeURIComponent(`${name}!${skuCol}:${skuCol}`);
+    const url      = `https://sheets.googleapis.com/v4/spreadsheets/${NPD_SHEET_ID}/values/${range}`;
+    const res      = await withRetry(() => httpsGet(url, { Authorization: `Bearer ${token}` }));
+    if (res.statusCode !== 200) {
+      console.warn(`  ⚠ Could not read NPD tab "${name}" (${res.statusCode}) — skipping`);
+      continue;
+    }
+    const values = JSON.parse(res.body).values ?? [];
+    let added = 0;
+    for (const [cell] of values) {
+      if (!cell || cell.trim() === "" || cell.trim().toUpperCase() === "NA" ||
+          cell.trim().toUpperCase() === "PRODUCT CODE") continue;
+      npdSkus.add(normalizeSKU(cell));
+      added++;
+    }
+    console.log(`  Tab "${name}" (col ${skuCol}): ${added} SKUs`);
+  }
+  return npdSkus;
+}
+
+/**
+ * For every row in the inventory dashboard whose SKU is in npdSkus,
+ * writes 1 to column AE (NPD flag) if it isn't already 1.
+ */
+async function markNpdFlags(token, skuRows, npdSkus) {
+  if (npdSkus.size === 0) { console.log("  No NPD SKUs found — nothing to mark."); return; }
+
+  // Build list of rows that need AE = 1
+  const toMark = [];
+  for (const { row, sku } of skuRows) {
+    if (npdSkus.has(normalizeSKU(sku))) toMark.push(row);
+  }
+  if (toMark.length === 0) { console.log("  No matching rows found in dashboard."); return; }
+
+  // Read current AE values so we only write where it isn't already 1
+  const firstRow = toMark[0];
+  const lastRow  = toMark[toMark.length - 1];
+  const readRange = encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${firstRow}:${NPD_FLAG_COL}${lastRow}`);
+  const readRes  = await withRetry(() =>
+    httpsGet(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${readRange}`,
+      { Authorization: `Bearer ${token}` })
+  );
+  const existing = JSON.parse(readRes.body).values ?? [];
+
+  // Filter to only rows where AE is blank or not "1"
+  const writeData = [];
+  for (const row of toMark) {
+    const idx     = row - firstRow;
+    const current = (existing[idx]?.[0] ?? "").toString().trim();
+    if (current !== "1") writeData.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [["1"]] });
+  }
+
+  if (writeData.length === 0) {
+    console.log(`  ✓ All ${toMark.length} matched rows already have NPD flag = 1`);
+    return;
+  }
+
+  const res = await withRetry(() =>
+    httpsRequest(
+      "POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
+      JSON.stringify({ valueInputOption: "RAW", data: writeData }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    )
+  );
+  if (res.statusCode !== 200) throw new Error(`NPD flag write error ${res.statusCode}: ${res.body.replace(/\s+/g, " ")}`);
+  console.log(`  ✓ Marked ${writeData.length} rows with NPD flag = 1 in col ${NPD_FLAG_COL}`);
+  console.log(`    (${toMark.length - writeData.length} were already marked)`);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Main
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -754,7 +846,7 @@ async function main() {
   await writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation);
 
   // Step 6 — append new rows for SKUs sold in last 3 days but not yet in sheet
-  console.log("\n[6/6] Checking for new products sold in last 30 days...");
+  console.log("\n[6/7] Checking for new products sold in last 30 days...");
   const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation);
   console.log(`  ${newSkus.length === 0 ? "✓ No new unmatched products found." : `⚡ ${newSkus.length} new SKU(s) to append`}`);
   // Re-read the sheet to get the true last row right before appending —
@@ -766,8 +858,15 @@ async function main() {
   console.log(`  New rows will start at      : ${lastRow + 1}`);
   if (!DRY_RUN) await appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap, lastRow);
 
+  // Step 7 — read NPD allocation sheet and mark column AE = 1 for matching SKUs
+  console.log("\n[7/7] Syncing NPD flags from allocation sheet...");
+  const npdSkus = await fetchNpdSkus(token);
+  console.log(`  Total NPD SKUs across all tabs: ${npdSkus.size}`);
+  const latestSkuRows = await readSheetSKUs(token);
+  await markNpdFlags(token, latestSkuRows, npdSkus);
+
   console.log("\n" + "═".repeat(58));
-  console.log("  Done. Columns G/K/L/N updated; new SKUs appended.");
+  console.log("  Done. Columns G/K/L/N updated; new SKUs appended; NPD flags set.");
   console.log("═".repeat(58) + "\n");
 }
 

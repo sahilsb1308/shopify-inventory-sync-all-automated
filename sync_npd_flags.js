@@ -172,7 +172,7 @@ async function main() {
     const idx     = row - firstRow;
     const current = (aeValues[idx]?.[0] ?? "").toString().trim();
     if (current === "1") continue;
-    toWrite.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [["1"]] });
+    toWrite.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]] });
     if (DRY_RUN) console.log(`  [DRY RUN] Would set AE${row} = 1  ← ${sku}`);
   }
 

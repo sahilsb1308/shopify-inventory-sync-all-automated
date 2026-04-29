@@ -41,7 +41,7 @@ const SHEET_TAB            = "Inventory Dashboard";
 const NPD_FLAG_COL         = "AE";  // Column in Inventory Dashboard to mark NPD = 1
 
 // ─── NPD Allocation sheet (separate spreadsheet) ─────────────────────────────
-const NPD_SHEET_ID  = "1XPNGd1JcgdU089g-UlScZcoZmYfGOVAMzRe7i10OBSU";
+const NPD_SHEET_ID  = "1Ubwo5ElTn4AH1zIWqZUOsjhvo-SZ_t_i2dZkCLOaKHw";
 const NPD_TABS      = [
   { name: "SB",                   skuCol: "D" },
   { name: "Select",               skuCol: "C" },

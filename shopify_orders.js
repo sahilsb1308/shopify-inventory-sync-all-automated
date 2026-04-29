@@ -444,7 +444,7 @@ function soldInLastNDays(dailyUnits, n) {
 
 /**
  * Finds Shopify SKUs that:
- *  1. Had at least 1 sale in the last 3 days
+ *  1. Had at least 1 sale in the last 30 days
  *  2. Are NOT already matched to any row in the sheet
  * Returns an array of SKU strings.
  */
@@ -456,7 +456,7 @@ function findNewUnmatchedSkus(salesMap, skuTranslation) {
   for (const [sku, data] of Object.entries(salesMap)) {
     if (sku.startsWith("NO_SKU__"))   continue;   // skip variants with no SKU
     if (coveredShopifySkus.has(sku))  continue;   // already in sheet
-    if (soldInLastNDays(data.dailyUnits, 3))  newSkus.push(sku);
+    if (soldInLastNDays(data.dailyUnits, 30))  newSkus.push(sku);
   }
   return newSkus;
 }
@@ -682,10 +682,10 @@ async function main() {
   await writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation);
 
   // Step 6 — append new rows for SKUs sold in last 3 days but not yet in sheet
-  console.log("\n[6/6] Checking for new products sold in last 3 days...");
+  console.log("\n[6/6] Checking for new products sold in last 30 days...");
   const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation);
   console.log(`  ${newSkus.length === 0 ? "✓ No new unmatched products found." : `⚡ ${newSkus.length} new SKU(s) to append`}`);
-  await appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap);
+  if (!DRY_RUN) await appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap);
 
   console.log("\n" + "═".repeat(58));
   console.log("  Done. Columns G/K/L/N updated; new SKUs appended.");

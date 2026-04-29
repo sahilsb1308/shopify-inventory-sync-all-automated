@@ -515,24 +515,27 @@ async function appendNewProductRows(token, newSkus, salesMap, stockMap, productN
   console.log(`    L${startRow}:L${endRow}  → OOS Days`);
   console.log(`    N${startRow}:N${endRow}  → Revenue`);
 
-  // Extend the sheet grid if needed so rows startRow–endRow exist
-  console.log(`  Extending sheet to at least ${endRow + 50} rows...`);
-  await withRetry(() =>
-    httpsRequest(
-      "POST",
-      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
-      JSON.stringify({
-        requests: [{
-          appendDimension: {
-            sheetId:   SHEET_GID,
-            dimension: "ROWS",
-            length:    newSkus.length + 100   // add buffer rows
-          }
-        }]
-      }),
-      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-    )
+  // Extend the sheet grid so rows startRow–endRow exist
+  const rowsToAdd = newSkus.length + 100;
+  console.log(`  Extending sheet: adding ${rowsToAdd} rows...`);
+  const extRes = await httpsRequest(
+    "POST",
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
+    JSON.stringify({
+      requests: [{
+        appendDimension: {
+          sheetId:   SHEET_GID,
+          dimension: "ROWS",
+          length:    rowsToAdd
+        }
+      }]
+    }),
+    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
   );
+  if (extRes.statusCode !== 200) {
+    throw new Error(`appendDimension failed ${extRes.statusCode}: ${extRes.body.replace(/\s+/g, " ")}`);
+  }
+  console.log(`  ✓ Sheet extended by ${rowsToAdd} rows`);
 
   const res = await withRetry(() =>
     httpsRequest(

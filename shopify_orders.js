@@ -330,7 +330,13 @@ async function fetchSalesReport() {
         const grossSales = (parseFloat(item.price) || 0) * qty;
         const netQty     = qty - (refundedQty[item.id] || 0);
 
-        if (!salesMap[sku]) salesMap[sku] = { gross_sales: 0, net_items_sold: 0, dailyUnits: {} };
+        if (!salesMap[sku]) salesMap[sku] = { gross_sales: 0, net_items_sold: 0, dailyUnits: {}, productTitle: "" };
+        // Capture product name from line item (only once per SKU)
+        if (!salesMap[sku].productTitle && item.title) {
+          const vt = (item.variant_title || "").trim();
+          salesMap[sku].productTitle = (vt && vt.toLowerCase() !== "default title")
+            ? `${item.title} - ${vt}` : item.title;
+        }
         salesMap[sku].gross_sales    += grossSales;
         salesMap[sku].net_items_sold += netQty;
 
@@ -369,7 +375,7 @@ async function fetchSalesReport() {
 // is missed. Ending Inventory Units = variant.inventory_quantity.
 // ═════════════════════════════════════════════════════════════════════════════
 
-async function fetchProductsByStatus(status, stockMap) {
+async function fetchProductsByStatus(status, stockMap, productNameMap) {
   let pageInfo      = null;
   let batch         = 0;
   let totalProducts = 0;
@@ -378,7 +384,7 @@ async function fetchProductsByStatus(status, stockMap) {
     batch++;
     const params = pageInfo
       ? `?limit=${PAGE_LIMIT}&page_info=${pageInfo}`
-      : `?limit=${PAGE_LIMIT}&status=${status}&fields=id,status,variants`;
+      : `?limit=${PAGE_LIMIT}&status=${status}&fields=id,status,title,variants`;
 
     const res = await shopifyGet("/products.json", params);
     if (res.statusCode !== 200) {
@@ -393,6 +399,12 @@ async function fetchProductsByStatus(status, stockMap) {
         if (!variant.sku?.trim()) continue;
         const sku = normalizeSKU(variant.sku);
         stockMap[sku] = (stockMap[sku] || 0) + (Number(variant.inventory_quantity) || 0);
+        // Capture product name from inventory (more reliable than order line items)
+        if (!productNameMap[sku]) {
+          const vt = (variant.title || "").trim();
+          productNameMap[sku] = (vt && vt.toLowerCase() !== "default title")
+            ? `${product.title} - ${vt}` : product.title;
+        }
       }
     }
 
@@ -405,16 +417,92 @@ async function fetchProductsByStatus(status, stockMap) {
 }
 
 async function fetchInventoryReport() {
-  const stockMap = {};
+  const stockMap      = {};
+  const productNameMap = {};
 
   // Fetch all three statuses — Shopify only returns active by default
-  const active   = await fetchProductsByStatus("active",   stockMap);
-  const archived = await fetchProductsByStatus("archived", stockMap);
-  const draft    = await fetchProductsByStatus("draft",    stockMap);
+  const active   = await fetchProductsByStatus("active",   stockMap, productNameMap);
+  const archived = await fetchProductsByStatus("archived", stockMap, productNameMap);
+  const draft    = await fetchProductsByStatus("draft",    stockMap, productNameMap);
 
   const total = active + archived + draft;
   console.log(`  ✓ ${total} total products (${active} active, ${archived} archived, ${draft} draft) → ${Object.keys(stockMap).length} unique SKUs`);
-  return stockMap;
+  return { stockMap, productNameMap };
+}
+
+// ─── New-product detection ───────────────────────────────────────────────────
+// Returns true if the SKU had at least 1 unit sold in the last N calendar days.
+function soldInLastNDays(dailyUnits, n) {
+  for (let i = 0; i < n; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    if ((dailyUnits[key] || 0) > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Finds Shopify SKUs that:
+ *  1. Had at least 1 sale in the last 3 days
+ *  2. Are NOT already matched to any row in the sheet
+ * Returns an array of SKU strings.
+ */
+function findNewUnmatchedSkus(salesMap, skuTranslation) {
+  // All Shopify SKUs that are already covered by a sheet row
+  const coveredShopifySkus = new Set(Object.values(skuTranslation).filter(Boolean));
+
+  const newSkus = [];
+  for (const [sku, data] of Object.entries(salesMap)) {
+    if (sku.startsWith("NO_SKU__"))   continue;   // skip variants with no SKU
+    if (coveredShopifySkus.has(sku))  continue;   // already in sheet
+    if (soldInLastNDays(data.dailyUnits, 3))  newSkus.push(sku);
+  }
+  return newSkus;
+}
+
+/**
+ * Appends one new row per unmatched SKU at the bottom of the sheet.
+ * Columns written: B (SKU), C (Product Name), G (Stock),
+ *                  K (Net Sold), L (OOS Days), N (Revenue)
+ * All other columns are left blank so existing formulas/validations aren't broken.
+ *
+ * Column index map (0-based, A=0):
+ *   B=1  C=2  G=6  K=10  L=11  N=13  → row array length = 14
+ */
+async function appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap) {
+  if (newSkus.length === 0) return;
+
+  const ROW_LEN = 14; // A … N
+  const rows = newSkus.map((sku) => {
+    const sales = salesMap[sku];
+    const stock = stockMap[sku] ?? 0;
+    const name  = productNameMap[sku] || sales?.productTitle || "";
+    const row   = new Array(ROW_LEN).fill("");
+    row[1]  = sku;                                               // B – SKU
+    row[2]  = name;                                              // C – Product Name
+    row[6]  = stock;                                             // G – Current Stock
+    row[10] = sales?.net_items_sold ?? 0;                        // K – Net Items Sold
+    row[11] = sales?.oos_days        ?? 30;                      // L – OOS Days
+    row[13] = parseFloat((sales?.gross_sales ?? 0).toFixed(2));  // N – Revenue (30D)
+    return row;
+  });
+
+  const range = `${SHEET_TAB}!A:N`;
+  const url   = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
+
+  const res = await withRetry(() =>
+    httpsRequest("POST", url, JSON.stringify({ values: rows }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" })
+  );
+
+  if (res.statusCode !== 200) throw new Error(`Sheets append error ${res.statusCode}: ${res.body}`);
+
+  console.log(`\n✓ Appended ${newSkus.length} new product row(s) (sold in last 3 days, not in sheet):`);
+  newSkus.forEach((sku) => {
+    const name = productNameMap[sku] || salesMap[sku]?.productTitle || "";
+    console.log(`  + ${sku}${name ? `  →  ${name}` : ""}`);
+  });
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -573,7 +661,7 @@ async function main() {
 
   // Step 3 — fetch inventory
   console.log("\n[4/5] Fetching inventory (Month End Inventory Snapshot)...");
-  const stockMap = await fetchInventoryReport();
+  const { stockMap, productNameMap } = await fetchInventoryReport();
 
   // Step 4 — build universal SKU translation map for ALL sheet SKUs
   console.log("\n[5/5] Building SKU translation map and writing to sheet...");
@@ -590,11 +678,17 @@ async function main() {
     return;
   }
 
-  // Step 5 — write to sheet using translated SKUs for lookups
+  // Step 5 — write to existing sheet rows using translated SKUs
   await writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation);
 
+  // Step 6 — append new rows for SKUs sold in last 3 days but not yet in sheet
+  console.log("\n[6/6] Checking for new products sold in last 3 days...");
+  const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation);
+  console.log(`  ${newSkus.length === 0 ? "✓ No new unmatched products found." : `⚡ ${newSkus.length} new SKU(s) to append`}`);
+  await appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap);
+
   console.log("\n" + "═".repeat(58));
-  console.log("  Done. Check columns G, K, L, N in your sheet.");
+  console.log("  Done. Columns G/K/L/N updated; new SKUs appended.");
   console.log("═".repeat(58) + "\n");
 }
 

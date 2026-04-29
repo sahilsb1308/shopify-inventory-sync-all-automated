@@ -37,7 +37,7 @@ const PAGE_LIMIT           = 250;
 const SERVICE_ACCOUNT_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "service_account.json";
 const SHEET_ID             = "1Y2EaDjGfMwscmpn9h7oR_mTOSVxErqWHeowftX01KdI";
 const SHEET_TAB            = "Inventory Dashboard";
-const SHEET_GID            = 2027363264;   // numeric gid of "Inventory Dashboard" tab
+// SHEET_GID looked up dynamically in appendNewProductRows — do not hardcode
 const SKU_COL              = "B";
 const STOCK_COL            = "G";   // Ending Inventory Units
 const UNITS_COL            = "K";   // Net Items Sold
@@ -515,6 +515,18 @@ async function appendNewProductRows(token, newSkus, salesMap, stockMap, productN
   console.log(`    L${startRow}:L${endRow}  → OOS Days`);
   console.log(`    N${startRow}:N${endRow}  → Revenue`);
 
+  // Look up the real numeric sheetId for SHEET_TAB (can't hardcode — differs per file)
+  const metaRes = await httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}?fields=sheets.properties`,
+    { Authorization: `Bearer ${token}` }
+  );
+  if (metaRes.statusCode !== 200) throw new Error(`Sheets metadata error ${metaRes.statusCode}`);
+  const sheets   = JSON.parse(metaRes.body).sheets ?? [];
+  const sheetMeta = sheets.find(s => s.properties?.title === SHEET_TAB);
+  if (!sheetMeta) throw new Error(`Tab "${SHEET_TAB}" not found in spreadsheet`);
+  const sheetGid = sheetMeta.properties.sheetId;
+  console.log(`  Tab "${SHEET_TAB}" has sheetId: ${sheetGid}`);
+
   // Extend the sheet grid so rows startRow–endRow exist
   const rowsToAdd = newSkus.length + 100;
   console.log(`  Extending sheet: adding ${rowsToAdd} rows...`);
@@ -524,7 +536,7 @@ async function appendNewProductRows(token, newSkus, salesMap, stockMap, productN
     JSON.stringify({
       requests: [{
         appendDimension: {
-          sheetId:   SHEET_GID,
+          sheetId:   sheetGid,
           dimension: "ROWS",
           length:    rowsToAdd
         }

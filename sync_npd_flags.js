@@ -157,27 +157,13 @@ async function main() {
 
   if (matchedRows.length === 0) { console.log("  No matches — nothing to write."); return; }
 
-  // Read current AE values to avoid overwriting existing 1s
-  const firstRow  = matchedRows[0].row;
-  const lastRow   = matchedRows[matchedRows.length - 1].row;
-  const aeRange   = encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${firstRow}:${NPD_FLAG_COL}${lastRow}`);
-  const aeRes     = await httpsGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${aeRange}`,
-    { Authorization: `Bearer ${token}` }
+  // Always overwrite all matched rows with numeric 1 (fixes text '1 → number 1)
+  const toWrite = matchedRows.map(({ row }) => ({
+    range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]]
+  }));
+  if (DRY_RUN) matchedRows.forEach(({ row, sku }) =>
+    console.log(`  [DRY RUN] Would set AE${row} = 1  ← ${sku}`)
   );
-  const aeValues  = JSON.parse(aeRes.body).values ?? [];
-
-  const toWrite = [];
-  for (const { row, sku } of matchedRows) {
-    const idx     = row - firstRow;
-    const current = (aeValues[idx]?.[0] ?? "").toString().trim();
-    if (current === "1") continue;
-    toWrite.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]] });
-    if (DRY_RUN) console.log(`  [DRY RUN] Would set AE${row} = 1  ← ${sku}`);
-  }
-
-  const alreadySet = matchedRows.length - toWrite.length;
-  console.log(`  Already marked: ${alreadySet}`);
   console.log(`  To be written:  ${toWrite.length}`);
 
   if (DRY_RUN) {
@@ -192,7 +178,7 @@ async function main() {
 
   const writeRes = await httpsPost(
     `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
-    JSON.stringify({ valueInputOption: "RAW", data: toWrite }),
+    JSON.stringify({ valueInputOption: "USER_ENTERED", data: toWrite }),
     { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
   );
   if (writeRes.statusCode !== 200)

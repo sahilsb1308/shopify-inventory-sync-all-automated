@@ -770,7 +770,7 @@ async function markNpdFlags(token, skuRows, npdSkus) {
   for (const row of toMark) {
     const idx     = row - firstRow;
     const current = (existing[idx]?.[0] ?? "").toString().trim();
-    if (current !== "1") writeData.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]] });
+    if (current !== "1" && current !== 1) writeData.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]] });
   }
 
   if (writeData.length === 0) {
@@ -782,7 +782,7 @@ async function markNpdFlags(token, skuRows, npdSkus) {
     httpsRequest(
       "POST",
       `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
-      JSON.stringify({ valueInputOption: "RAW", data: writeData }),
+      JSON.stringify({ valueInputOption: "USER_ENTERED", data: writeData }),
       { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
     )
   );

@@ -48,6 +48,22 @@ function normalizeSKU(sku) {
     .trim();
 }
 
+/**
+ * Returns the NPD matching key — everything up to (but not including) the
+ * second hyphen.  Lets "SB-B02" (NPD sheet) match "SB-B02-01" (dashboard).
+ *
+ *   "SB-B02"     → "SB-B02"
+ *   "SB-B02-01"  → "SB-B02"
+ *   "SB-CB153-V" → "SB-CB153"
+ */
+function npdPrefix(sku) {
+  const s          = normalizeSKU(sku);
+  const firstDash  = s.indexOf("-");
+  if (firstDash === -1) return s;
+  const secondDash = s.indexOf("-", firstDash + 1);
+  return secondDash === -1 ? s : s.slice(0, secondDash);
+}
+
 function httpsGet(url, headers = {}) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers }, (res) => {
@@ -130,7 +146,7 @@ async function main() {
       if (!cell || !cell.trim() ||
           cell.trim().toUpperCase() === "NA" ||
           cell.trim().toUpperCase() === "PRODUCT CODE") continue;
-      npdSkus.add(normalizeSKU(cell));
+      npdSkus.add(npdPrefix(cell));
       added++;
     }
     console.log(`  Tab "${name}" (col ${skuCol}): ${added} SKUs`);
@@ -167,7 +183,7 @@ async function main() {
     const idx        = row - DATA_START_ROW;
     const currentRaw = (aeValues[idx]?.[0] ?? "").toString().trim();
     const current    = parseFloat(currentRaw) || 0;
-    const isNpd      = npdSkus.has(normalizeSKU(sku));
+    const isNpd      = npdSkus.has(npdPrefix(sku));
 
     if (isNpd && current !== 1) {
       // In NPD sheet but not marked → set 1

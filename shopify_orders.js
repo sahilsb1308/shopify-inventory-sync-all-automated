@@ -362,20 +362,8 @@ async function fetchSalesReport() {
     if (pageInfo) await sleep(500);
   } while (pageInfo !== null);
 
-  // Calculate OOS days per SKU:
-  // For each of the 30 days, if units sold on that day < 5 → OOS day
-  const startDate = new Date(D30_AGO_ISO);
-  for (const sku of Object.keys(salesMap)) {
-    let oosDays = 0;
-    for (let i = 0; i < 30; i++) {
-      const d    = new Date(startDate);
-      d.setDate(d.getDate() + i);
-      const key  = d.toISOString().slice(0, 10);
-      const sold = salesMap[sku].dailyUnits[key] || 0;
-      if (sold < 5) oosDays++;
-    }
-    salesMap[sku].oos_days = oosDays;
-  }
+  // OOS days are computed later in writeToSheet() using per-SKU priority thresholds.
+  // dailyUnits is kept in salesMap for that calculation.
 
   console.log(`  ✓ ${totalOrders} orders processed → ${Object.keys(salesMap).length} unique SKUs`);
   return salesMap;
@@ -503,8 +491,10 @@ async function appendNewProductRows(token, newSkus, salesMap, stockMap, productN
     colB.push([sku]);
     colC.push([name]);
     colG.push([stock]);
+    // New products have no priority yet → use P3 threshold (sold > 0)
+    const newOosDays = sales?.dailyUnits ? calcOosDays(sales.dailyUnits, 0) : 30;
     colK.push([sales?.net_items_sold ?? 0]);
-    colL.push([sales?.oos_days        ?? 30]);
+    colL.push([newOosDays]);
     colN.push([parseFloat((sales?.gross_sales ?? 0).toFixed(2))]);
   });
 
@@ -618,15 +608,52 @@ async function getGoogleAccessToken() {
 }
 
 async function readSheetSKUs(token) {
-  const range = `${SHEET_TAB}!${SKU_COL}${DATA_START_ROW}:${SKU_COL}`;
-  const url   = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}`;
-  const res   = await withRetry(() => httpsGet(url, { Authorization: `Bearer ${token}` }));
+  // Read col B (SKU) and col AA (Priority) in parallel
+  const urlB  = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(`${SHEET_TAB}!${SKU_COL}${DATA_START_ROW}:${SKU_COL}`)}`;
+  const urlAA = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(`${SHEET_TAB}!AA${DATA_START_ROW}:AA`)}`;
 
-  if (res.statusCode !== 200) throw new Error(`Sheets read error ${res.statusCode}: ${res.body}`);
+  const [resB, resAA] = await Promise.all([
+    withRetry(() => httpsGet(urlB,  { Authorization: `Bearer ${token}` })),
+    withRetry(() => httpsGet(urlAA, { Authorization: `Bearer ${token}` })),
+  ]);
 
-  return (JSON.parse(res.body).values ?? [])
-    .map((row, i) => ({ sku: normalizeSKU(row[0] ?? ""), row: DATA_START_ROW + i }))
+  if (resB.statusCode !== 200) throw new Error(`Sheets read error ${resB.statusCode}: ${resB.body}`);
+
+  const skuValues = JSON.parse(resB.body).values ?? [];
+  const aaValues  = resAA.statusCode === 200 ? (JSON.parse(resAA.body).values ?? []) : [];
+
+  return skuValues
+    .map((row, i) => ({
+      sku:      normalizeSKU(row[0] ?? ""),
+      row:      DATA_START_ROW + i,
+      priority: (aaValues[i]?.[0] ?? "").toString().trim().toUpperCase(),
+    }))
     .filter((r) => r.sku !== "");
+}
+
+// ─── OOS days helpers ─────────────────────────────────────────────────────────
+// Threshold = minimum daily units needed to NOT count as an OOS day.
+// A day is OOS if sold <= threshold.
+//   P0 / P1 → threshold 5  (need > 5 sold to be "in stock")
+//   P2      → threshold 1  (need > 1 sold)
+//   P3 / ?  → threshold 0  (any non-zero sale is enough)
+function oosThreshold(priority) {
+  if (priority === "P0" || priority === "P1") return 5;
+  if (priority === "P2")                      return 1;
+  return 0; // P3 or unknown
+}
+
+function calcOosDays(dailyUnits, threshold) {
+  const startDate = new Date(D30_AGO_ISO);
+  let oosDays = 0;
+  for (let i = 0; i < 30; i++) {
+    const d   = new Date(startDate);
+    d.setDate(d.getDate() + i);
+    const key  = d.toISOString().slice(0, 10);
+    const sold = dailyUnits[key] || 0;
+    if (sold <= threshold) oosDays++;
+  }
+  return oosDays;
 }
 
 async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation = {}) {
@@ -643,7 +670,7 @@ async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation =
   const unmatchedSales = [];
   const unmatchedStock = [];
 
-  for (const { sku, row } of skuRows) {
+  for (const { sku, row, priority } of skuRows) {
     const idx        = row - DATA_START_ROW;
     // Use translated Shopify SKU for lookup, fall back to sheet SKU
     const lookupSku  = skuTranslation[sku] ?? sku;
@@ -651,12 +678,13 @@ async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation =
     const stock      = stockMap[lookupSku];
 
     if (sales !== undefined) {
+      const threshold = oosThreshold(priority ?? "");
       colK[idx] = [sales.net_items_sold];
-      colL[idx] = [sales.oos_days];
+      colL[idx] = [calcOosDays(sales.dailyUnits, threshold)];
       colN[idx] = [parseFloat(sales.gross_sales.toFixed(2))];
       matchedSales++;
     } else {
-      // No sales in last 30 days → all 30 days are OOS days
+      // No sales in last 30 days → all 30 days are OOS regardless of priority
       colK[idx] = [0];
       colL[idx] = [30];
       colN[idx] = [0];
@@ -715,8 +743,26 @@ async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation =
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
+ * Returns the NPD matching key for a SKU — everything up to (but not including)
+ * the second hyphen.  This lets "SB-B02" in the NPD sheet match "SB-B02-01",
+ * "SB-B02-02", etc. in the Inventory Dashboard.
+ *
+ * Examples:
+ *   "SB-B02"      → "SB-B02"   (no second hyphen → keep as-is)
+ *   "SB-B02-01"   → "SB-B02"
+ *   "SB-CB153-V"  → "SB-CB153"
+ */
+function npdPrefix(sku) {
+  const s          = normalizeSKU(sku);
+  const firstDash  = s.indexOf("-");
+  if (firstDash === -1) return s;
+  const secondDash = s.indexOf("-", firstDash + 1);
+  return secondDash === -1 ? s : s.slice(0, secondDash);
+}
+
+/**
  * Reads product codes from all NPD allocation tabs and returns a Set of
- * normalised SKUs that are in the NPD pipeline.
+ * normalised SKU prefixes (up to second hyphen) that are in the NPD pipeline.
  */
 async function fetchNpdSkus(token) {
   const npdSkus = new Set();
@@ -733,7 +779,7 @@ async function fetchNpdSkus(token) {
     for (const [cell] of values) {
       if (!cell || cell.trim() === "" || cell.trim().toUpperCase() === "NA" ||
           cell.trim().toUpperCase() === "PRODUCT CODE") continue;
-      npdSkus.add(normalizeSKU(cell));
+      npdSkus.add(npdPrefix(cell));
       added++;
     }
     console.log(`  Tab "${name}" (col ${skuCol}): ${added} SKUs`);
@@ -764,7 +810,7 @@ async function markNpdFlags(token, skuRows, npdSkus) {
   for (const { row, sku } of skuRows) {
     const idx        = row - DATA_START_ROW;
     const current    = parseFloat((existing[idx]?.[0] ?? "").toString().trim()) || 0;
-    const isNpd      = npdSkus.has(normalizeSKU(sku));
+    const isNpd      = npdSkus.has(npdPrefix(sku));
 
     if (isNpd && current !== 1) {
       writeData.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`, values: [[1]] });

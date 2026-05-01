@@ -879,8 +879,8 @@ async function readKitsSheet(token) {
   if (res.statusCode !== 200) throw new Error(`Kits sheet read error ${res.statusCode}: ${res.body}`);
 
   const [bRange, dRange] = JSON.parse(res.body).valueRanges ?? [];
-  const kitSkus   = (bRange?.values ?? []).map(r => (r[0] ?? "").trim());
-  const childSkus = (dRange?.values ?? []).map(r => (r[0] ?? "").trim());
+  const kitSkus   = (bRange?.values ?? []).map(r => normalizeSKU(r[0] ?? ""));
+  const childSkus = (dRange?.values ?? []).map(r => normalizeSKU(r[0] ?? ""));
 
   const childToKits      = {};   // childSku → [parentKitSku, ...]
   const kitParentPrefixes = new Set();

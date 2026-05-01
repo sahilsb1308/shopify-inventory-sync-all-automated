@@ -850,7 +850,7 @@ async function markNpdFlags(token, skuRows, npdSkus) {
 //   1. Kit parent (its prefix appears in Kits sheet col B)  → 0
 //   2. No DRR and not a kit child (Kits sheet col D)        → 0
 //   3. Otherwise: (DRR * 30 + Σ kit_total_sold) × multiplier
-//      Multiplier = MAX(NPD=1.8, PromoQ=1.5, PromoR=1.2, P0=1.5/P1=1.3/P2=1.2/P3=1.1)
+//      Multiplier = MAX(AE=1→6, PromoQ=1.5, PromoR=1.2, P0=1.5/P1=1.3/P2=1.2/P3=1.1)
 // ═════════════════════════════════════════════════════════════════════════════
 
 function skuPrefix(sku) {
@@ -859,11 +859,11 @@ function skuPrefix(sku) {
   return parts.length >= 2 ? `${parts[0]}-${parts[1]}` : sku;
 }
 
-function demandMultiplier(priority, npd, promoQ, promoR) {
+function demandMultiplier(priority, npdFlag, promoQ, promoR) {
   const candidates = [];
-  if ((npd ?? "").trim().toUpperCase() === "NPD") candidates.push(1.8);
-  if (Number(promoQ) === 1) candidates.push(1.5);
-  if (Number(promoR) === 1) candidates.push(1.2);
+  if (Number(npdFlag) === 1) candidates.push(6);   // col AE = 1 → NPD flag multiplier
+  if (Number(promoQ)  === 1) candidates.push(1.5);
+  if (Number(promoR)  === 1) candidates.push(1.2);
   const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
   candidates.push(pMap[(priority ?? "").trim().toUpperCase()] ?? 0);
   return candidates.length ? Math.max(...candidates) : 0;
@@ -899,20 +899,20 @@ async function readKitsSheet(token) {
 async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefixes) {
   const lastRow  = skuRows[skuRows.length - 1].row;
 
-  // Batch-read O (NPD flag), Q (promo), R (promo), U (DRR), K (total sold — read from
-  // sheet directly so kit parent K values are correct regardless of SKU translation gaps)
+  // Batch-read Q (promo), R (promo), U (DRR), K (total sold), AE (NPD flag)
+  // K is read from the sheet so kit parent K values are correct regardless of SKU translation gaps
   const ranges = [
-    `${SHEET_TAB}!O${DATA_START_ROW}:O${lastRow}`,
     `${SHEET_TAB}!Q${DATA_START_ROW}:Q${lastRow}`,
     `${SHEET_TAB}!R${DATA_START_ROW}:R${lastRow}`,
     `${SHEET_TAB}!U${DATA_START_ROW}:U${lastRow}`,
     `${SHEET_TAB}!K${DATA_START_ROW}:K${lastRow}`,
+    `${SHEET_TAB}!AE${DATA_START_ROW}:AE${lastRow}`,
   ];
   const batchUrl = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet?${ranges.map(r => `ranges=${encodeURIComponent(r)}`).join("&")}`;
   const batchRes = await withRetry(() => httpsGet(batchUrl, { Authorization: `Bearer ${token}` }));
   if (batchRes.statusCode !== 200) throw new Error(`Demand cols read error ${batchRes.statusCode}: ${batchRes.body}`);
 
-  const [oVals, qVals, rVals, uVals, kVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
+  const [qVals, rVals, uVals, kVals, aeVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
 
   // Build normalizedSku → K and skuPrefix → K from the sheet's col K values.
   // Reading from the sheet (not salesMap) avoids SKU-translation gaps — step 5 already
@@ -934,7 +934,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
     const i        = row - DATA_START_ROW;
     const drr_raw  = (uVals[i]?.[0] ?? "").trim();
     const drr      = drr_raw === "" ? null : (parseFloat(drr_raw) || 0);
-    const npd      = (oVals[i]?.[0] ?? "").trim();
+    const npdFlag  = (aeVals[i]?.[0] ?? "").trim();
     const promoQ   = (qVals[i]?.[0] ?? "").trim();
     const promoR   = (rVals[i]?.[0] ?? "").trim();
     const isChild  = sku in childToKits;
@@ -954,7 +954,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
       const kitK = skuToK[kitSku] ?? prefixToK[skuPrefix(kitSku)] ?? 0;
       return sum + kitK;
     }, 0);
-    const multiplier = demandMultiplier(priority, npd, promoQ, promoR);
+    const multiplier = demandMultiplier(priority, npdFlag, promoQ, promoR);
 
     colX[i] = [parseFloat(((base + kitContrib) * multiplier).toFixed(2))];
   }

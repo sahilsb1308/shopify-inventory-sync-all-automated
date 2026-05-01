@@ -52,7 +52,7 @@ const NPD_TABS      = [
 const SKU_COL              = "B";
 const STOCK_COL            = "G";   // Ending Inventory Units
 const UNITS_COL            = "K";   // Net Items Sold
-const OOS_DAYS_COL         = "L";   // OOS Days (days where daily units sold < 5)
+const OOS_DAYS_COL         = "L";   // OOS Days (priority-based: P0/P1 ≤5, P2 ≤1, P3 =0)
 const REVENUE_COL          = "N";   // Gross Sales
 const DATA_START_ROW       = 2;
 
@@ -352,8 +352,10 @@ async function fetchSalesReport() {
         salesMap[sku].gross_sales    += grossSales;
         salesMap[sku].net_items_sold += netQty;
 
-        // Accumulate daily units for OOS days calculation
-        salesMap[sku].dailyUnits[orderDate] = (salesMap[sku].dailyUnits[orderDate] || 0) + netQty;
+        // Accumulate daily units for OOS days calculation (gross qty ordered, not net — matches
+        // Shopify Analytics "Quantity Ordered" metric so refunds on later dates don't unfairly
+        // make a day look OOS)
+        salesMap[sku].dailyUnits[orderDate] = (salesMap[sku].dailyUnits[orderDate] || 0) + qty;
       }
     }
 

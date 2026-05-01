@@ -896,28 +896,34 @@ async function readKitsSheet(token) {
   return { childToKits, kitParentPrefixes };
 }
 
-async function writeProjectedDemand(token, skuRows, salesMap, skuTranslation, childToKits, kitParentPrefixes) {
+async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefixes) {
   const lastRow  = skuRows[skuRows.length - 1].row;
 
-  // Batch-read O (NPD flag), Q (promo), R (promo), U (DRR) for all dashboard rows
+  // Batch-read O (NPD flag), Q (promo), R (promo), U (DRR), K (total sold — read from
+  // sheet directly so kit parent K values are correct regardless of SKU translation gaps)
   const ranges = [
     `${SHEET_TAB}!O${DATA_START_ROW}:O${lastRow}`,
     `${SHEET_TAB}!Q${DATA_START_ROW}:Q${lastRow}`,
     `${SHEET_TAB}!R${DATA_START_ROW}:R${lastRow}`,
     `${SHEET_TAB}!U${DATA_START_ROW}:U${lastRow}`,
+    `${SHEET_TAB}!K${DATA_START_ROW}:K${lastRow}`,
   ];
   const batchUrl = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet?${ranges.map(r => `ranges=${encodeURIComponent(r)}`).join("&")}`;
   const batchRes = await withRetry(() => httpsGet(batchUrl, { Authorization: `Bearer ${token}` }));
   if (batchRes.statusCode !== 200) throw new Error(`Demand cols read error ${batchRes.statusCode}: ${batchRes.body}`);
 
-  const [oVals, qVals, rVals, uVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
+  const [oVals, qVals, rVals, uVals, kVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
 
-  // Build skuPrefix → K (total sold 30d) from salesMap — used to look up kit parent K values
-  const prefixToK = {};
-  for (const { sku } of skuRows) {
-    const lookupSku = skuTranslation[sku] ?? sku;
-    const k         = salesMap[lookupSku]?.net_items_sold ?? 0;
-    const prefix    = skuPrefix(sku);
+  // Build normalizedSku → K and skuPrefix → K from the sheet's col K values.
+  // Reading from the sheet (not salesMap) avoids SKU-translation gaps — step 5 already
+  // wrote the correct K for every row, so this is the authoritative source.
+  const skuToK    = {};   // exact normalized SKU → K
+  const prefixToK = {};   // first-match prefix    → K
+  for (const { sku, row } of skuRows) {
+    const i = row - DATA_START_ROW;
+    const k = parseFloat((kVals[i]?.[0] ?? "0").replace(/,/g, "")) || 0;
+    skuToK[sku] = k;
+    const prefix = skuPrefix(sku);
     if (!(prefix in prefixToK)) prefixToK[prefix] = k;
   }
 
@@ -940,9 +946,14 @@ async function writeProjectedDemand(token, skuRows, salesMap, skuTranslation, ch
     if (drr === null && !isChild) { colX[i] = [0]; continue; }
 
     // Rule 3: (DRR*30 + kit contribution) × multiplier
+    // Kit contribution: for each parent kit that contains this child SKU,
+    // add the kit's col K (total sold 30d) from the sheet.
+    // Try exact SKU match first, then fall back to prefix match (mirrors VLOOKUP behaviour).
     const base       = (drr ?? 0) * 30;
-    const kitContrib = (childToKits[sku] ?? []).reduce((sum, kitSku) =>
-      sum + (prefixToK[skuPrefix(kitSku)] ?? 0), 0);
+    const kitContrib = (childToKits[sku] ?? []).reduce((sum, kitSku) => {
+      const kitK = skuToK[kitSku] ?? prefixToK[skuPrefix(kitSku)] ?? 0;
+      return sum + kitK;
+    }, 0);
     const multiplier = demandMultiplier(priority, npd, promoQ, promoR);
 
     colX[i] = [parseFloat(((base + kitContrib) * multiplier).toFixed(2))];
@@ -1040,7 +1051,7 @@ async function main() {
   const { childToKits, kitParentPrefixes } = await readKitsSheet(token);
   console.log(`  Kits sheet: ${kitParentPrefixes.size} kit parents, ${Object.keys(childToKits).length} child SKUs`);
   const finalSkuRows = await readSheetSKUs(token);
-  await writeProjectedDemand(token, finalSkuRows, salesMap, skuTranslation, childToKits, kitParentPrefixes);
+  await writeProjectedDemand(token, finalSkuRows, childToKits, kitParentPrefixes);
 
   console.log("\n" + "═".repeat(58));
   console.log("  Done. Columns G/K/L/N/X updated; new SKUs appended; NPD flags set.");

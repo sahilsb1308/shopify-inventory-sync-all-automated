@@ -54,6 +54,7 @@ const STOCK_COL            = "G";   // Ending Inventory Units
 const UNITS_COL            = "K";   // Net Items Sold
 const OOS_DAYS_COL         = "L";   // OOS Days (priority-based: P0/P1 ≤5, P2 ≤1, P3 =0)
 const REVENUE_COL          = "N";   // Gross Sales
+const DEMAND_COL           = "X";   // Projected Demand 30d
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────
@@ -844,6 +845,123 @@ async function markNpdFlags(token, skuRows, npdSkus) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// Projected Demand  (Column X)
+// Logic mirrors the Google Sheets formula:
+//   1. Kit parent (its prefix appears in Kits sheet col B)  → 0
+//   2. No DRR and not a kit child (Kits sheet col D)        → 0
+//   3. Otherwise: (DRR * 30 + Σ kit_total_sold) × multiplier
+//      Multiplier = MAX(NPD=1.8, PromoQ=1.5, PromoR=1.2, P0=1.5/P1=1.3/P2=1.2/P3=1.1)
+// ═════════════════════════════════════════════════════════════════════════════
+
+function skuPrefix(sku) {
+  // "SB-K01-01" → "SB-K01"  (first two hyphen-segments, mirrors FIND second-dash logic)
+  const parts = sku.split("-");
+  return parts.length >= 2 ? `${parts[0]}-${parts[1]}` : sku;
+}
+
+function demandMultiplier(priority, npd, promoQ, promoR) {
+  const candidates = [];
+  if ((npd ?? "").trim().toUpperCase() === "NPD") candidates.push(1.8);
+  if (Number(promoQ) === 1) candidates.push(1.5);
+  if (Number(promoR) === 1) candidates.push(1.2);
+  const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
+  candidates.push(pMap[(priority ?? "").trim().toUpperCase()] ?? 0);
+  return candidates.length ? Math.max(...candidates) : 0;
+}
+
+async function readKitsSheet(token) {
+  // Read col B (parent kit SKU) and col D (child SKU) from Kits sheet in one batchGet
+  const rangeB = encodeURIComponent(`'Kits - Child SKUs'!B2:B500`);
+  const rangeD = encodeURIComponent(`'Kits - Child SKUs'!D2:D500`);
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet?ranges=${rangeB}&ranges=${rangeD}`;
+
+  const res = await withRetry(() => httpsGet(url, { Authorization: `Bearer ${token}` }));
+  if (res.statusCode !== 200) throw new Error(`Kits sheet read error ${res.statusCode}: ${res.body}`);
+
+  const [bRange, dRange] = JSON.parse(res.body).valueRanges ?? [];
+  const kitSkus   = (bRange?.values ?? []).map(r => (r[0] ?? "").trim());
+  const childSkus = (dRange?.values ?? []).map(r => (r[0] ?? "").trim());
+
+  const childToKits      = {};   // childSku → [parentKitSku, ...]
+  const kitParentPrefixes = new Set();
+  const len = Math.max(kitSkus.length, childSkus.length);
+
+  for (let i = 0; i < len; i++) {
+    const kitSku   = kitSkus[i]   ?? "";
+    const childSku = childSkus[i] ?? "";
+    if (kitSku)             kitParentPrefixes.add(skuPrefix(kitSku));
+    if (kitSku && childSku) (childToKits[childSku] ??= []).push(kitSku);
+  }
+
+  return { childToKits, kitParentPrefixes };
+}
+
+async function writeProjectedDemand(token, skuRows, salesMap, skuTranslation, childToKits, kitParentPrefixes) {
+  const lastRow  = skuRows[skuRows.length - 1].row;
+
+  // Batch-read O (NPD flag), Q (promo), R (promo), U (DRR) for all dashboard rows
+  const ranges = [
+    `${SHEET_TAB}!O${DATA_START_ROW}:O${lastRow}`,
+    `${SHEET_TAB}!Q${DATA_START_ROW}:Q${lastRow}`,
+    `${SHEET_TAB}!R${DATA_START_ROW}:R${lastRow}`,
+    `${SHEET_TAB}!U${DATA_START_ROW}:U${lastRow}`,
+  ];
+  const batchUrl = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet?${ranges.map(r => `ranges=${encodeURIComponent(r)}`).join("&")}`;
+  const batchRes = await withRetry(() => httpsGet(batchUrl, { Authorization: `Bearer ${token}` }));
+  if (batchRes.statusCode !== 200) throw new Error(`Demand cols read error ${batchRes.statusCode}: ${batchRes.body}`);
+
+  const [oVals, qVals, rVals, uVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
+
+  // Build skuPrefix → K (total sold 30d) from salesMap — used to look up kit parent K values
+  const prefixToK = {};
+  for (const { sku } of skuRows) {
+    const lookupSku = skuTranslation[sku] ?? sku;
+    const k         = salesMap[lookupSku]?.net_items_sold ?? 0;
+    const prefix    = skuPrefix(sku);
+    if (!(prefix in prefixToK)) prefixToK[prefix] = k;
+  }
+
+  const totalRows = lastRow - DATA_START_ROW + 1;
+  const colX      = Array.from({ length: totalRows }, () => [""]);
+
+  for (const { sku, row, priority } of skuRows) {
+    const i        = row - DATA_START_ROW;
+    const drr_raw  = (uVals[i]?.[0] ?? "").trim();
+    const drr      = drr_raw === "" ? null : (parseFloat(drr_raw) || 0);
+    const npd      = (oVals[i]?.[0] ?? "").trim();
+    const promoQ   = (qVals[i]?.[0] ?? "").trim();
+    const promoR   = (rVals[i]?.[0] ?? "").trim();
+    const isChild  = sku in childToKits;
+
+    // Rule 1: kit parent → 0
+    if (kitParentPrefixes.has(skuPrefix(sku))) { colX[i] = [0]; continue; }
+
+    // Rule 2: no DRR and not a kit child → 0
+    if (drr === null && !isChild) { colX[i] = [0]; continue; }
+
+    // Rule 3: (DRR*30 + kit contribution) × multiplier
+    const base       = (drr ?? 0) * 30;
+    const kitContrib = (childToKits[sku] ?? []).reduce((sum, kitSku) =>
+      sum + (prefixToK[skuPrefix(kitSku)] ?? 0), 0);
+    const multiplier = demandMultiplier(priority, npd, promoQ, promoR);
+
+    colX[i] = [parseFloat(((base + kitContrib) * multiplier).toFixed(2))];
+  }
+
+  const rangeX = `${SHEET_TAB}!${DEMAND_COL}${DATA_START_ROW}:${DEMAND_COL}${lastRow}`;
+  const res = await withRetry(() =>
+    httpsRequest(
+      "POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
+      JSON.stringify({ valueInputOption: "RAW", data: [{ range: rangeX, values: colX }] }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    )
+  );
+  if (res.statusCode !== 200) throw new Error(`Projected demand write error ${res.statusCode}: ${res.body}`);
+  console.log(`  ✓ Col X (Projected Demand) written for ${skuRows.length} rows`);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Main
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -854,7 +972,7 @@ async function main() {
   console.log(`Store     : ${SHOPIFY_STORE}`);
   console.log(`30D start : ${D30_AGO_ISO}`);
   console.log(`Sheet     : ${SHEET_TAB}  |  SKU col: ${SKU_COL}  |  Start row: ${DATA_START_ROW}`);
-  console.log(`Writes    : G=Stock  K=Net Sold  L=OOS Days  N=Gross Sales`);
+  console.log(`Writes    : G=Stock  K=Net Sold  L=OOS Days  N=Gross Sales  X=Projected Demand`);
   if (DRY_RUN) console.log(`Mode      : DRY RUN`);
   console.log("─".repeat(58));
 
@@ -911,14 +1029,21 @@ async function main() {
   if (!DRY_RUN) await appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap, lastRow);
 
   // Step 7 — read NPD allocation sheet and mark column AE = 1 for matching SKUs
-  console.log("\n[7/7] Syncing NPD flags from allocation sheet...");
+  console.log("\n[7/8] Syncing NPD flags from allocation sheet...");
   const npdSkus = await fetchNpdSkus(token);
   console.log(`  Total NPD SKUs across all tabs: ${npdSkus.size}`);
   const latestSkuRows = await readSheetSKUs(token);
   await markNpdFlags(token, latestSkuRows, npdSkus);
 
+  // Step 8 — calculate and write projected demand (col X)
+  console.log("\n[8/8] Writing projected demand (col X)...");
+  const { childToKits, kitParentPrefixes } = await readKitsSheet(token);
+  console.log(`  Kits sheet: ${kitParentPrefixes.size} kit parents, ${Object.keys(childToKits).length} child SKUs`);
+  const finalSkuRows = await readSheetSKUs(token);
+  await writeProjectedDemand(token, finalSkuRows, salesMap, skuTranslation, childToKits, kitParentPrefixes);
+
   console.log("\n" + "═".repeat(58));
-  console.log("  Done. Columns G/K/L/N updated; new SKUs appended; NPD flags set.");
+  console.log("  Done. Columns G/K/L/N/X updated; new SKUs appended; NPD flags set.");
   console.log("═".repeat(58) + "\n");
 }
 

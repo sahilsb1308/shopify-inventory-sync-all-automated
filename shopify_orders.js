@@ -64,6 +64,7 @@ const DOI_COL              = "V";   // Days of Inventory = G / U
 const DEMAND_7D_COL        = "W";   // Projected Demand 7d
 const DEMAND_COL           = "X";   // Projected Demand 30d
 const PROJ_REV_COL         = "Y";   // Projected Revenue 30d
+const STOCK_STATUS_COL     = "Z";   // Stock Status (output)
 const PRIORITY_COL         = "AA";  // Priority P0–P3 (output)
 const REV_CONTRIB_COL      = "AB";  // Revenue Contribution %
 const FILL_RATE_COL        = "AC";  // Fill Rate = (K + G) / S
@@ -684,6 +685,16 @@ function calcDrr(netSold, oosDays) {
   return Math.round((netSold / available) * 10000) / 10000;
 }
 
+function calcStockStatus(doi) {
+  if (doi === null || doi === "") return "";
+  const v = Number(doi);
+  if (v <= 10)  return "Critical";
+  if (v <= 40)  return "Low";
+  if (v <= 70)  return "Healthy";
+  if (v <= 100) return "Overstocked";
+  return "Excess";
+}
+
 // 50th-percentile median matching Google Sheets PERCENTILE(..., 0.5).
 function calcMedian(values) {
   if (values.length === 0) return 0;
@@ -988,6 +999,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
   const colW  = Array.from({ length: totalRows }, () => [""]);
   const colX  = Array.from({ length: totalRows }, () => [""]);
   const colY  = Array.from({ length: totalRows }, () => [0]);
+  const colZ  = Array.from({ length: totalRows }, () => [""]);
   const colAA = Array.from({ length: totalRows }, () => ["P3"]);
   const colAB = Array.from({ length: totalRows }, () => [0]);
   const colAC = Array.from({ length: totalRows }, () => [0]);
@@ -1068,7 +1080,11 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
     const asp       = kVal > 0 ? nVal / kVal : 0;
 
     // Col V — Days of Inventory = G / DRR
-    colV[i] = [drr && drr > 0 && gVal > 0 ? parseFloat((gVal / drr).toFixed(2)) : 0];
+    const doiVal = drr && drr > 0 && gVal > 0 ? parseFloat((gVal / drr).toFixed(2)) : 0;
+    colV[i] = [doiVal];
+
+    // Col Z — Stock Status
+    colZ[i] = [calcStockStatus(doiVal)];
 
     colW[i]  = [demand7d];
     colX[i]  = [demand30d];
@@ -1089,6 +1105,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
         { range: make(DEMAND_7D_COL),     values: colW  },
         { range: make(DEMAND_COL),        values: colX  },
         { range: make(PROJ_REV_COL),      values: colY  },
+        { range: make(STOCK_STATUS_COL),  values: colZ  },
         { range: make(PRIORITY_COL),      values: colAA },
         { range: make(REV_CONTRIB_COL),   values: colAB },
         { range: make(FILL_RATE_COL),     values: colAC },
@@ -1098,7 +1115,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
     )
   );
   if (res.statusCode !== 200) throw new Error(`Derived cols write error ${res.statusCode}: ${res.body}`);
-  console.log(`  ✓ Cols M/R/T/V/W/X/Y/AA/AB/AC/AD written for ${skuRows.length} rows`);
+  console.log(`  ✓ Cols M/R/T/V/W/X/Y/Z/AA/AB/AC/AD written for ${skuRows.length} rows`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -1027,17 +1027,6 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
     const isBestseller = nRaw !== "" && nVal >= nMedian ? 1 : 0;
     colR[i] = [isBestseller];
 
-    // Col M — Revenue Multiplier
-    const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
-    const mScore = Math.max(
-      Number(npdFlag) === 1 ? 6   : 0,
-      npd.toUpperCase() === "NPD" ? 1.8 : 0,
-      Number(promoQ) === 1  ? 1.5 : 0,
-      isBestseller === 1    ? 1.2 : 0,
-      pMap[priority?.toUpperCase()] ?? 0,
-    );
-    colM[i] = [mScore];
-
     // Col T — Total Available Stock = G + I + J (0 if any blank)
     if (gRaw === "" || iRaw === "" || jRaw === "") {
       colT[i] = [0];
@@ -1061,6 +1050,17 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
     } catch (_) { computedPriority = "P3"; }
     colAA[i] = [computedPriority];
 
+    // Col M — Revenue Multiplier (uses computedPriority, not stale sheet AA)
+    const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
+    const mScore = Math.max(
+      Number(npdFlag) === 1           ? 6   : 0,
+      npd.toUpperCase() === "NPD"     ? 1.8 : 0,
+      Number(promoQ) === 1            ? 1.5 : 0,
+      isBestseller === 1              ? 1.2 : 0,
+      pMap[computedPriority] ?? 1,
+    );
+    colM[i] = [mScore];
+
     // Col AC — Fill Rate = (K + G) / S
     colAC[i] = [sVal > 0 ? parseFloat(((kVal + gVal) / sVal).toFixed(4)) : 0];
 
@@ -1073,7 +1073,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
     const kitContrib = (childToKits[sku] ?? []).reduce((sum, kitSku) => {
       return sum + (skuToK[kitSku] ?? prefixToK[skuPrefix(kitSku)] ?? 0);
     }, 0);
-    const multiplier = demandMultiplier(computedPriority, npd, npdFlag, promoQ, String(isBestseller));
+    const multiplier = mScore;
 
     const demand7d  = parseFloat((((drr ?? 0) *  7 + kitContrib * 7 / 30) * multiplier).toFixed(2));
     const demand30d = parseFloat((((drr ?? 0) * 30 + kitContrib          ) * multiplier).toFixed(2));

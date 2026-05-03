@@ -1064,15 +1064,22 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     // Col AC — Fill Rate = (K + G) / S
     colAC[i] = [sVal > 0 ? parseFloat(((kVal + gVal) / sVal).toFixed(4)) : 0];
 
-    // Demand / revenue columns need DRR — skip if no DRR and not a kit child
+    // Col V — Days of Inventory = G / DRR
+    const doiVal = drr && drr > 0 && gVal > 0 ? parseFloat((gVal / drr).toFixed(2)) : 0;
+    colV[i] = drr !== null ? [doiVal] : [""];
+
+    // Col Z — Stock Status
+    colZ[i] = [drr !== null ? calcStockStatus(doiVal) : ""];
+
+    // No DRR and not a kit child → blank demand columns
     if (drr === null && !isChild) { colW[i] = [""]; colX[i] = [""]; colAD[i] = [""]; continue; }
 
-    // Kit parent → W=0, X=0
-    // Mirrors formula: COUNTIF(kits!B, skuPrefix(dashboardSku)) > 0
-    // Check 1: dashboard SKU prefix appears as an exact value in kits col B (formula behaviour)
-    // Check 2: dashboard SKU itself is an exact value in kits col B (belt-and-suspenders)
-    if (kitParentSkus.has(skuPrefix(sku)) || kitParentSkus.has(sku)) {
-      colW[i] = [0]; colX[i] = [0]; colAD[i] = [""]; continue;
+    // Kit parent → only W and X are 0; all other columns already computed above
+    const isKitParent = kitParentSkus.has(skuPrefix(sku)) || kitParentSkus.has(sku);
+    if (isKitParent) {
+      colW[i] = [0]; colX[i] = [0];
+      colY[i] = [0]; colAD[i] = [0];
+      continue;
     }
 
     const kitContrib = (childToKits[sku] ?? []).reduce((sum, kitSku) => {
@@ -1083,13 +1090,6 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     const demand7d  = parseFloat((((drr ?? 0) *  7 + kitContrib * 7 / 30) * multiplier).toFixed(2));
     const demand30d = parseFloat((((drr ?? 0) * 30 + kitContrib          ) * multiplier).toFixed(2));
     const asp       = kVal > 0 ? nVal / kVal : 0;
-
-    // Col V — Days of Inventory = G / DRR
-    const doiVal = drr && drr > 0 && gVal > 0 ? parseFloat((gVal / drr).toFixed(2)) : 0;
-    colV[i] = [doiVal];
-
-    // Col Z — Stock Status
-    colZ[i] = [calcStockStatus(doiVal)];
 
     colW[i]  = [demand7d];
     colX[i]  = [demand30d];

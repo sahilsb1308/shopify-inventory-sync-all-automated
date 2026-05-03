@@ -936,21 +936,21 @@ async function readKitsSheet(token) {
   const kitSkus   = (bRange?.values ?? []).map(r => normalizeSKU(r[0] ?? ""));
   const childSkus = (dRange?.values ?? []).map(r => normalizeSKU(r[0] ?? ""));
 
-  const childToKits      = {};   // childSku → [parentKitSku, ...]
-  const kitParentPrefixes = new Set();
+  const childToKits   = {};         // childSku → [parentKitSku, ...]
+  const kitParentSkus = new Set();  // exact normalized col-B values from kits sheet
   const len = Math.max(kitSkus.length, childSkus.length);
 
   for (let i = 0; i < len; i++) {
     const kitSku   = kitSkus[i]   ?? "";
     const childSku = childSkus[i] ?? "";
-    if (kitSku)             kitParentPrefixes.add(skuPrefix(kitSku));
+    if (kitSku)             kitParentSkus.add(kitSku);              // exact SKU from col B
     if (kitSku && childSku) (childToKits[childSku] ??= []).push(kitSku);
   }
 
-  return { childToKits, kitParentPrefixes };
+  return { childToKits, kitParentSkus };
 }
 
-async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefixes) {
+async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) {
   const lastRow  = skuRows[skuRows.length - 1].row;
 
   // Batch-read all columns needed for derived calculations
@@ -1067,8 +1067,13 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
     // Demand / revenue columns need DRR — skip if no DRR and not a kit child
     if (drr === null && !isChild) { colW[i] = [""]; colX[i] = [""]; colAD[i] = [""]; continue; }
 
-    // Kit parent → 0
-    if (kitParentPrefixes.has(skuPrefix(sku))) { colW[i] = [0]; colX[i] = [0]; colAD[i] = [""]; continue; }
+    // Kit parent → W=0, X=0
+    // Mirrors formula: COUNTIF(kits!B, skuPrefix(dashboardSku)) > 0
+    // Check 1: dashboard SKU prefix appears as an exact value in kits col B (formula behaviour)
+    // Check 2: dashboard SKU itself is an exact value in kits col B (belt-and-suspenders)
+    if (kitParentSkus.has(skuPrefix(sku)) || kitParentSkus.has(sku)) {
+      colW[i] = [0]; colX[i] = [0]; colAD[i] = [""]; continue;
+    }
 
     const kitContrib = (childToKits[sku] ?? []).reduce((sum, kitSku) => {
       return sum + (skuToK[kitSku] ?? prefixToK[skuPrefix(kitSku)] ?? 0);
@@ -1194,10 +1199,11 @@ async function main() {
 
   // Step 8 — calculate and write projected demand (col X)
   console.log("\n[8/8] Writing projected demand (col X)...");
-  const { childToKits, kitParentPrefixes } = await readKitsSheet(token);
-  console.log(`  Kits sheet: ${kitParentPrefixes.size} kit parents, ${Object.keys(childToKits).length} child SKUs`);
+  const { childToKits, kitParentSkus } = await readKitsSheet(token);
+  console.log(`  Kits sheet: ${kitParentSkus.size} kit parent SKUs, ${Object.keys(childToKits).length} child SKUs`);
+  if (kitParentSkus.size > 0) console.log(`  Sample kit parents: ${[...kitParentSkus].slice(0, 5).join(", ")}`);
   const finalSkuRows = await readSheetSKUs(token);
-  await writeProjectedDemand(token, finalSkuRows, childToKits, kitParentPrefixes);
+  await writeProjectedDemand(token, finalSkuRows, childToKits, kitParentSkus);
 
   console.log("\n" + "═".repeat(58));
   console.log("  Done. Cols G/K/L/N/U written from Shopify; M/R/T/V/W/X/Y/AB/AC/AD derived; NPD flags set.");

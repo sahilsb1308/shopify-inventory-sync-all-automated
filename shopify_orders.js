@@ -1075,8 +1075,8 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
     }, 0);
     const multiplier = demandMultiplier(computedPriority, npd, npdFlag, promoQ, String(isBestseller));
 
-    const demand7d  = parseFloat(((( drr ?? 0) *  7 + kitContrib) * multiplier).toFixed(2));
-    const demand30d = parseFloat((((drr ?? 0) * 30 + kitContrib) * multiplier).toFixed(2));
+    const demand7d  = parseFloat((((drr ?? 0) *  7 + kitContrib * 7 / 30) * multiplier).toFixed(2));
+    const demand30d = parseFloat((((drr ?? 0) * 30 + kitContrib          ) * multiplier).toFixed(2));
     const asp       = kVal > 0 ? nVal / kVal : 0;
 
     // Col V — Days of Inventory = G / DRR

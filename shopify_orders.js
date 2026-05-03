@@ -50,11 +50,25 @@ const NPD_TABS      = [
 ];
 
 const SKU_COL              = "B";
-const STOCK_COL            = "G";   // Ending Inventory Units
+const RTO_STOCK_COL        = "I";   // RTO Stock
+const INWARD_STOCK_COL     = "J";   // Inward Stock
 const UNITS_COL            = "K";   // Net Items Sold
 const OOS_DAYS_COL         = "L";   // OOS Days (priority-based: P0/P1 ≤5, P2 ≤1, P3 =0)
+const MULTIPLIER_COL       = "M";   // Revenue Multiplier
 const REVENUE_COL          = "N";   // Gross Sales
+const BESTSELLER_COL       = "R";   // Bestseller flag (1 if N ≥ median N)
+const LAST_MONTH_PROJ_COL  = "S";   // Last Month's Projection
+const TOTAL_STOCK_COL      = "T";   // Total Available Stock = G + I + J
+const DRR_COL              = "U";   // Daily Run Rate = K / (30 − OOS Days)
+const DOI_COL              = "V";   // Days of Inventory = G / U
+const DEMAND_7D_COL        = "W";   // Projected Demand 7d
 const DEMAND_COL           = "X";   // Projected Demand 30d
+const PROJ_REV_COL         = "Y";   // Projected Revenue 30d
+const PRIORITY_COL         = "AA";  // Priority P0–P3 (output)
+const REV_CONTRIB_COL      = "AB";  // Revenue Contribution %
+const FILL_RATE_COL        = "AC";  // Fill Rate = (K + G) / S
+const UNITS_TO_FILL_COL    = "AD";  // Units to be Filled = MAX(0, X − G)
+const STOCK_COL            = "G";   // Ending Inventory Units
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────
@@ -483,9 +497,9 @@ async function appendNewProductRows(token, newSkus, salesMap, stockMap, productN
   const startRow = lastExistingRow + 1;
 
   // Build one data array per column (same pattern as writeToSheet which works reliably)
-  // We write only the columns we own: B, C, G, K, L, N
+  // We write only the columns we own: B, C, G, K, L, N, U
   // Each column gets its own range + values array in the batchUpdate call.
-  const colB = [], colC = [], colG = [], colK = [], colL = [], colN = [];
+  const colB = [], colC = [], colG = [], colK = [], colL = [], colN = [], colU = [];
 
   newSkus.forEach((sku) => {
     const sales = salesMap[sku];
@@ -495,10 +509,12 @@ async function appendNewProductRows(token, newSkus, salesMap, stockMap, productN
     colC.push([name]);
     colG.push([stock]);
     // New products have no priority yet → use P3 threshold (sold > 0)
-    const newOosDays = sales?.dailyUnits ? calcOosDays(sales.dailyUnits, 0) : 30;
-    colK.push([sales?.net_items_sold ?? 0]);
+    const newOosDays  = sales?.dailyUnits ? calcOosDays(sales.dailyUnits, 0) : 30;
+    const netSold     = sales?.net_items_sold ?? 0;
+    colK.push([netSold]);
     colL.push([newOosDays]);
     colN.push([parseFloat((sales?.gross_sales ?? 0).toFixed(2))]);
+    colU.push([calcDrr(netSold, newOosDays) ?? ""]);
   });
 
   const endRow = startRow + newSkus.length - 1;
@@ -518,6 +534,7 @@ async function appendNewProductRows(token, newSkus, salesMap, stockMap, productN
   console.log(`    K${startRow}:K${endRow}  → Net Items Sold`);
   console.log(`    L${startRow}:L${endRow}  → OOS Days`);
   console.log(`    N${startRow}:N${endRow}  → Revenue`);
+  console.log(`    U${startRow}:U${endRow}  → DRR`);
 
   // Look up the real numeric sheetId for SHEET_TAB (can't hardcode — differs per file)
   const metaRes = await httpsGet(
@@ -566,6 +583,7 @@ async function appendNewProductRows(token, newSkus, salesMap, stockMap, productN
           { range: `${SHEET_TAB}!K${startRow}:K${endRow}`, values: colK },
           { range: `${SHEET_TAB}!L${startRow}:L${endRow}`, values: colL },
           { range: `${SHEET_TAB}!N${startRow}:N${endRow}`, values: colN },
+          { range: `${SHEET_TAB}!U${startRow}:U${endRow}`, values: colU },
         ]
       }),
       { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
@@ -659,6 +677,21 @@ function calcOosDays(dailyUnits, threshold) {
   return oosDays;
 }
 
+// DRR = Net Sold / (30 − OOS Days).  Returns null when always-OOS (no available days).
+function calcDrr(netSold, oosDays) {
+  const available = 30 - oosDays;
+  if (available <= 0) return null;
+  return Math.round((netSold / available) * 10000) / 10000;
+}
+
+// 50th-percentile median matching Google Sheets PERCENTILE(..., 0.5).
+function calcMedian(values) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid    = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
 async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation = {}) {
   const lastRow   = skuRows[skuRows.length - 1].row;
   const totalRows = lastRow - DATA_START_ROW + 1;
@@ -667,6 +700,7 @@ async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation =
   const colK = Array.from({ length: totalRows }, () => [""]);
   const colL = Array.from({ length: totalRows }, () => [""]);
   const colN = Array.from({ length: totalRows }, () => [""]);
+  const colU = Array.from({ length: totalRows }, () => [""]);
 
   let matchedSales = 0;
   let matchedStock = 0;
@@ -682,15 +716,18 @@ async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation =
 
     if (sales !== undefined) {
       const threshold = oosThreshold(priority ?? "");
+      const oosDays   = calcOosDays(sales.dailyUnits, threshold);
       colK[idx] = [sales.net_items_sold];
-      colL[idx] = [calcOosDays(sales.dailyUnits, threshold)];
+      colL[idx] = [oosDays];
       colN[idx] = [parseFloat(sales.gross_sales.toFixed(2))];
+      colU[idx] = [calcDrr(sales.net_items_sold, oosDays) ?? ""];
       matchedSales++;
     } else {
       // No sales in last 30 days → all 30 days are OOS regardless of priority
       colK[idx] = [0];
       colL[idx] = [30];
       colN[idx] = [0];
+      colU[idx] = [""];   // always OOS — no DRR
       unmatchedSales.push(sku);
     }
 
@@ -707,6 +744,7 @@ async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation =
   const rangeK = `${SHEET_TAB}!${UNITS_COL}${DATA_START_ROW}:${UNITS_COL}${lastRow}`;
   const rangeL = `${SHEET_TAB}!${OOS_DAYS_COL}${DATA_START_ROW}:${OOS_DAYS_COL}${lastRow}`;
   const rangeN = `${SHEET_TAB}!${REVENUE_COL}${DATA_START_ROW}:${REVENUE_COL}${lastRow}`;
+  const rangeU = `${SHEET_TAB}!${DRR_COL}${DATA_START_ROW}:${DRR_COL}${lastRow}`;
 
   const res = await withRetry(() =>
     httpsRequest(
@@ -717,6 +755,7 @@ async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation =
         { range: rangeK, values: colK },
         { range: rangeL, values: colL },
         { range: rangeN, values: colN },
+        { range: rangeU, values: colU },
       ]}),
       { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
     )
@@ -730,6 +769,7 @@ async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation =
   console.log(`  Col K (Net Items Sold)   → ${matchedSales}/${skuRows.length} SKUs matched`);
   console.log(`  Col L (OOS Days)         → ${matchedSales}/${skuRows.length} SKUs matched`);
   console.log(`  Col N (Gross Sales)      → ${matchedSales}/${skuRows.length} SKUs matched`);
+  console.log(`  Col U (DRR)              → ${matchedSales}/${skuRows.length} SKUs matched`);
 
   if (unmatchedStock.length > 0) {
     console.log(`\n  ⚠ SKUs not found in Shopify inventory (written as 0):`);
@@ -902,27 +942,29 @@ async function readKitsSheet(token) {
 async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefixes) {
   const lastRow  = skuRows[skuRows.length - 1].row;
 
-  // Batch-read O (NPD text), Q (promo), R (promo), U (DRR), K (total sold), AE (NPD flag)
-  // K is read from the sheet so kit parent K values are correct regardless of SKU translation gaps
+  // Batch-read all columns needed for derived calculations
   const ranges = [
-    `${SHEET_TAB}!O${DATA_START_ROW}:O${lastRow}`,
-    `${SHEET_TAB}!Q${DATA_START_ROW}:Q${lastRow}`,
-    `${SHEET_TAB}!R${DATA_START_ROW}:R${lastRow}`,
-    `${SHEET_TAB}!U${DATA_START_ROW}:U${lastRow}`,
-    `${SHEET_TAB}!K${DATA_START_ROW}:K${lastRow}`,
-    `${SHEET_TAB}!AE${DATA_START_ROW}:AE${lastRow}`,
+    `${SHEET_TAB}!O${DATA_START_ROW}:O${lastRow}`,   // NPD text
+    `${SHEET_TAB}!Q${DATA_START_ROW}:Q${lastRow}`,   // Promo Q
+    `${SHEET_TAB}!U${DATA_START_ROW}:U${lastRow}`,   // DRR (just written)
+    `${SHEET_TAB}!K${DATA_START_ROW}:K${lastRow}`,   // Net Sold (just written)
+    `${SHEET_TAB}!AE${DATA_START_ROW}:AE${lastRow}`, // NPD flag
+    `${SHEET_TAB}!N${DATA_START_ROW}:N${lastRow}`,   // Gross Sales (just written)
+    `${SHEET_TAB}!G${DATA_START_ROW}:G${lastRow}`,   // Current Stock (just written)
+    `${SHEET_TAB}!I${DATA_START_ROW}:I${lastRow}`,   // RTO Stock
+    `${SHEET_TAB}!J${DATA_START_ROW}:J${lastRow}`,   // Inward Stock
+    `${SHEET_TAB}!S${DATA_START_ROW}:S${lastRow}`,   // Last Month's Projection
   ];
   const batchUrl = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet?${ranges.map(r => `ranges=${encodeURIComponent(r)}`).join("&")}`;
   const batchRes = await withRetry(() => httpsGet(batchUrl, { Authorization: `Bearer ${token}` }));
   if (batchRes.statusCode !== 200) throw new Error(`Demand cols read error ${batchRes.statusCode}: ${batchRes.body}`);
 
-  const [oVals, qVals, rVals, uVals, kVals, aeVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
+  const [oVals, qVals, uVals, kVals, aeVals, nVals, gVals, iVals, jVals, sVals] =
+    (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
 
-  // Build normalizedSku → K and skuPrefix → K from the sheet's col K values.
-  // Reading from the sheet (not salesMap) avoids SKU-translation gaps — step 5 already
-  // wrote the correct K for every row, so this is the authoritative source.
-  const skuToK    = {};   // exact normalized SKU → K
-  const prefixToK = {};   // first-match prefix    → K
+  // Build SKU → K and prefix → K lookups for kit contribution
+  const skuToK    = {};
+  const prefixToK = {};
   for (const { sku, row } of skuRows) {
     const i = row - DATA_START_ROW;
     const k = parseFloat((kVals[i]?.[0] ?? "0").replace(/,/g, "")) || 0;
@@ -931,47 +973,132 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentPrefix
     if (!(prefix in prefixToK)) prefixToK[prefix] = k;
   }
 
+  // Pre-compute total N and median N for bestseller + revenue contribution
+  const nNonBlank = skuRows
+    .map(({ row }) => { const raw = (nVals[row - DATA_START_ROW]?.[0] ?? "").trim(); return raw !== "" ? parseFloat(raw) || 0 : null; })
+    .filter(v => v !== null);
+  const totalN  = nNonBlank.reduce((s, v) => s + v, 0);
+  const nMedian = calcMedian(nNonBlank);
+
   const totalRows = lastRow - DATA_START_ROW + 1;
-  const colX      = Array.from({ length: totalRows }, () => [""]);
+  const colM  = Array.from({ length: totalRows }, () => [0]);
+  const colR  = Array.from({ length: totalRows }, () => [0]);
+  const colT  = Array.from({ length: totalRows }, () => [0]);
+  const colV  = Array.from({ length: totalRows }, () => [0]);
+  const colW  = Array.from({ length: totalRows }, () => [""]);
+  const colX  = Array.from({ length: totalRows }, () => [""]);
+  const colY  = Array.from({ length: totalRows }, () => [0]);
+  const colAA = Array.from({ length: totalRows }, () => ["P3"]);
+  const colAB = Array.from({ length: totalRows }, () => [0]);
+  const colAC = Array.from({ length: totalRows }, () => [0]);
+  const colAD = Array.from({ length: totalRows }, () => [""]);
 
   for (const { sku, row, priority } of skuRows) {
-    const i        = row - DATA_START_ROW;
-    const drr_raw = (uVals[i]?.[0] ?? "").trim();
-    const drr     = drr_raw === "" ? null : (parseFloat(drr_raw) || 0);
+    const i       = row - DATA_START_ROW;
+    const drrRaw  = (uVals[i]?.[0] ?? "").trim();
+    const drr     = drrRaw === "" ? null : (parseFloat(drrRaw) || 0);
     const npd     = (oVals[i]?.[0] ?? "").trim();
     const npdFlag = (aeVals[i]?.[0] ?? "").trim();
     const promoQ  = (qVals[i]?.[0] ?? "").trim();
-    const promoR  = (rVals[i]?.[0] ?? "").trim();
+    const nRaw    = (nVals[i]?.[0] ?? "").trim();
+    const gRaw    = (gVals[i]?.[0] ?? "").trim();
+    const iRaw    = (iVals[i]?.[0] ?? "").trim();
+    const jRaw    = (jVals[i]?.[0] ?? "").trim();
+    const sRaw    = (sVals[i]?.[0] ?? "").trim();
+    const kVal    = parseFloat((kVals[i]?.[0] ?? "0").replace(/,/g, "")) || 0;
+    const nVal    = nRaw !== "" ? parseFloat(nRaw) || 0 : 0;
+    const gVal    = gRaw !== "" ? parseFloat(gRaw) || 0 : 0;
+    const sVal    = sRaw !== "" ? parseFloat(sRaw) || 0 : 0;
     const isChild = sku in childToKits;
 
-    // AND(U="", COUNTIF(Kits!D:D, B)=0) → blank (mirrors formula returning "")
-    if (drr === null && !isChild) { colX[i] = [""]; continue; }
+    // Col R — Bestseller: 1 if N ≥ median of all non-blank N values
+    const isBestseller = nRaw !== "" && nVal >= nMedian ? 1 : 0;
+    colR[i] = [isBestseller];
 
-    // (DRR*30 + Σ kit K) × multiplier
-    // Kit contribution: MMULT equivalent — for each kit where this SKU is a child (col D),
-    // look up the kit parent (col B) prefix in the dashboard to get its col K value.
-    // Exact SKU match first, then prefix fallback (mirrors INDEX/MATCH on second-dash prefix).
-    const base       = (drr ?? 0) * 30;
+    // Col M — Revenue Multiplier
+    const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
+    const mScore = Math.max(
+      Number(npdFlag) === 1 ? 6   : 0,
+      npd.toUpperCase() === "NPD" ? 1.8 : 0,
+      Number(promoQ) === 1  ? 1.5 : 0,
+      isBestseller === 1    ? 1.2 : 0,
+      pMap[priority?.toUpperCase()] ?? 0,
+    );
+    colM[i] = [mScore];
+
+    // Col T — Total Available Stock = G + I + J (0 if any blank)
+    if (gRaw === "" || iRaw === "" || jRaw === "") {
+      colT[i] = [0];
+    } else {
+      colT[i] = [(parseFloat(gRaw) || 0) + (parseFloat(iRaw) || 0) + (parseFloat(jRaw) || 0)];
+    }
+
+    // Col AB — Revenue Contribution %
+    const abVal = nRaw !== "" && totalN > 0 ? parseFloat(((nVal / totalN) * 100).toFixed(4)) : 0;
+    colAB[i] = [abVal];
+
+    // Col AA — Priority (computed from AE, Q, AB — in that order)
+    let computedPriority;
+    try {
+      if      (Number(npdFlag) === 1) computedPriority = "P0";
+      else if (Number(promoQ)  === 1) computedPriority = "P0";
+      else if (abVal > 1)             computedPriority = "P0";
+      else if (abVal >= 0.44)         computedPriority = "P1";
+      else if (abVal >= 0.2)          computedPriority = "P2";
+      else                            computedPriority = "P3";
+    } catch (_) { computedPriority = "P3"; }
+    colAA[i] = [computedPriority];
+
+    // Col AC — Fill Rate = (K + G) / S
+    colAC[i] = [sVal > 0 ? parseFloat(((kVal + gVal) / sVal).toFixed(4)) : 0];
+
+    // Demand / revenue columns need DRR — skip if no DRR and not a kit child
+    if (drr === null && !isChild) { colW[i] = [""]; colX[i] = [""]; colAD[i] = [""]; continue; }
+
+    // Kit parent → 0
+    if (kitParentPrefixes.has(skuPrefix(sku))) { colW[i] = [0]; colX[i] = [0]; colAD[i] = [""]; continue; }
+
     const kitContrib = (childToKits[sku] ?? []).reduce((sum, kitSku) => {
-      const kitK = skuToK[kitSku] ?? prefixToK[skuPrefix(kitSku)] ?? 0;
-      return sum + kitK;
+      return sum + (skuToK[kitSku] ?? prefixToK[skuPrefix(kitSku)] ?? 0);
     }, 0);
-    const multiplier = demandMultiplier(priority, npd, npdFlag, promoQ, promoR);
+    const multiplier = demandMultiplier(computedPriority, npd, npdFlag, promoQ, String(isBestseller));
 
-    colX[i] = [parseFloat(((base + kitContrib) * multiplier).toFixed(2))];
+    const demand7d  = parseFloat(((( drr ?? 0) *  7 + kitContrib) * multiplier).toFixed(2));
+    const demand30d = parseFloat((((drr ?? 0) * 30 + kitContrib) * multiplier).toFixed(2));
+    const asp       = kVal > 0 ? nVal / kVal : 0;
+
+    // Col V — Days of Inventory = G / DRR
+    colV[i] = [drr && drr > 0 && gVal > 0 ? parseFloat((gVal / drr).toFixed(2)) : 0];
+
+    colW[i]  = [demand7d];
+    colX[i]  = [demand30d];
+    colY[i]  = [parseFloat((demand30d * asp).toFixed(2))];
+    colAD[i] = [Math.max(0, parseFloat((demand30d - gVal).toFixed(2)))];
   }
 
-  const rangeX = `${SHEET_TAB}!${DEMAND_COL}${DATA_START_ROW}:${DEMAND_COL}${lastRow}`;
+  const make = col => `${SHEET_TAB}!${col}${DATA_START_ROW}:${col}${lastRow}`;
   const res = await withRetry(() =>
     httpsRequest(
       "POST",
       `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
-      JSON.stringify({ valueInputOption: "RAW", data: [{ range: rangeX, values: colX }] }),
+      JSON.stringify({ valueInputOption: "RAW", data: [
+        { range: make(MULTIPLIER_COL),    values: colM  },
+        { range: make(BESTSELLER_COL),    values: colR  },
+        { range: make(TOTAL_STOCK_COL),   values: colT  },
+        { range: make(DOI_COL),           values: colV  },
+        { range: make(DEMAND_7D_COL),     values: colW  },
+        { range: make(DEMAND_COL),        values: colX  },
+        { range: make(PROJ_REV_COL),      values: colY  },
+        { range: make(PRIORITY_COL),      values: colAA },
+        { range: make(REV_CONTRIB_COL),   values: colAB },
+        { range: make(FILL_RATE_COL),     values: colAC },
+        { range: make(UNITS_TO_FILL_COL), values: colAD },
+      ]}),
       { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
     )
   );
-  if (res.statusCode !== 200) throw new Error(`Projected demand write error ${res.statusCode}: ${res.body}`);
-  console.log(`  ✓ Col X (Projected Demand) written for ${skuRows.length} rows`);
+  if (res.statusCode !== 200) throw new Error(`Derived cols write error ${res.statusCode}: ${res.body}`);
+  console.log(`  ✓ Cols M/R/T/V/W/X/Y/AA/AB/AC/AD written for ${skuRows.length} rows`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -985,7 +1112,7 @@ async function main() {
   console.log(`Store     : ${SHOPIFY_STORE}`);
   console.log(`30D start : ${D30_AGO_ISO}`);
   console.log(`Sheet     : ${SHEET_TAB}  |  SKU col: ${SKU_COL}  |  Start row: ${DATA_START_ROW}`);
-  console.log(`Writes    : G=Stock  K=Net Sold  L=OOS Days  N=Gross Sales  X=Projected Demand`);
+  console.log(`Writes    : G/K/L/N/U  →  M/R/T/V/W/X/Y/AB/AC/AD`);
   if (DRY_RUN) console.log(`Mode      : DRY RUN`);
   console.log("─".repeat(58));
 
@@ -1056,7 +1183,7 @@ async function main() {
   await writeProjectedDemand(token, finalSkuRows, childToKits, kitParentPrefixes);
 
   console.log("\n" + "═".repeat(58));
-  console.log("  Done. Columns G/K/L/N/X updated; new SKUs appended; NPD flags set.");
+  console.log("  Done. Cols G/K/L/N/U written from Shopify; M/R/T/V/W/X/Y/AB/AC/AD derived; NPD flags set.");
   console.log("═".repeat(58) + "\n");
 }
 

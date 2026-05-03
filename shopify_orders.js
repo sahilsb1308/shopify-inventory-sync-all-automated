@@ -35,7 +35,7 @@ const PAGE_LIMIT           = 250;
 
 // ─── Google Sheets config ────────────────────────────────────────────────────
 const SERVICE_ACCOUNT_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "service_account.json";
-const SHEET_ID             = "1Y2EaDjGfMwscmpn9h7oR_mTOSVxErqWHeowftX01KdI";
+const SHEET_ID             = process.env.GOOGLE_SHEET_ID || "1Y2EaDjGfMwscmpn9h7oR_mTOSVxErqWHeowftX01KdI";
 const SHEET_TAB            = "Inventory Dashboard";
 // SHEET_GID looked up dynamically in appendNewProductRows — do not hardcode
 const NPD_FLAG_COL         = "AE";  // Column in Inventory Dashboard to mark NPD = 1

@@ -75,6 +75,10 @@ def sku_prefix(sku: str) -> str:
     return "-".join(parts[:2]) if len(parts) >= 2 else sku
 
 
+def normalize_sku(sku: str) -> str:
+    return " ".join(sku.strip().upper().replace(" - ", "-").replace("- ", "-").replace(" -", "-").split()).rstrip(".")
+
+
 def to_float(value, default=None):
     try:
         v = str(value).replace(",", "").strip()
@@ -149,20 +153,20 @@ def main():
 
     # ── Parse Kits sheet ──────────────────────────────────────────────────────
     child_to_kits: dict[str, list[str]] = {}
-    kit_parent_prefixes: set[str] = set()
+    kit_parent_skus: set[str] = set()  # exact normalized col-B values
 
     for row in kits_rows[1:]:
-        kit_sku   = safe_col(row, 1)  # col B
-        child_sku = safe_col(row, 3)  # col D
+        kit_sku   = normalize_sku(safe_col(row, 1))  # col B
+        child_sku = normalize_sku(safe_col(row, 3))  # col D
         if kit_sku:
-            kit_parent_prefixes.add(sku_prefix(kit_sku))
+            kit_parent_skus.add(kit_sku)
         if kit_sku and child_sku:
             child_to_kits.setdefault(child_sku, []).append(kit_sku)
 
     # ── Build prefix → total-sold-30d lookup ─────────────────────────────────
     prefix_to_k: dict[str, float] = {}
     for row in dash_rows[1:]:
-        sku = safe_col(row, COL_SKU)
+        sku = normalize_sku(safe_col(row, COL_SKU))
         if not sku:
             continue
         k_val = to_float(safe_col(row, COL_K), default=0) or 0
@@ -264,7 +268,8 @@ def main():
             continue
 
         # Rule 2: kit parent → 0 demand
-        if sku_prefix(sku) in kit_parent_prefixes:
+        norm_sku = normalize_sku(sku)
+        if sku_prefix(norm_sku) in kit_parent_skus or norm_sku in kit_parent_skus:
             doi_results.append(blank)
             stock_status_results.append(blank)
             demand_7d_results.append([0])
@@ -286,7 +291,7 @@ def main():
         # Kit contribution (uses K from sheet)
         kit_contrib = sum(
             prefix_to_k.get(sku_prefix(kit_sku), 0)
-            for kit_sku in child_to_kits.get(sku, [])
+            for kit_sku in child_to_kits.get(norm_sku, [])
         )
 
         base_drr = drr or 0

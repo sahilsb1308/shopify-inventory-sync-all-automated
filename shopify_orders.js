@@ -1041,8 +1041,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     // Col AA — Priority (computed from AE, Q, AB — in that order)
     let computedPriority;
     try {
-      if      (Number(npdFlag) === 1) computedPriority = "P0";
-      else if (Number(promoQ)  === 1) computedPriority = "P0";
+      if      (Number(promoQ)  === 1) computedPriority = "P0";
       else if (abVal > 1)             computedPriority = "P0";
       else if (abVal >= 0.44)         computedPriority = "P1";
       else if (abVal >= 0.2)          computedPriority = "P2";

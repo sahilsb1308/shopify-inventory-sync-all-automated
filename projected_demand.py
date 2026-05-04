@@ -99,8 +99,6 @@ def calc_drr(k_val: float, oos_days: float):
 
 
 def calc_priority(npd_flag: str, promo_q: str, ab_val: float) -> str:
-    if to_float(npd_flag) == 1:
-        return "P0"
     if to_float(promo_q) == 1:
         return "P0"
     if ab_val > 1:

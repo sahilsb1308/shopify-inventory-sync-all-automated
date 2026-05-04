@@ -151,8 +151,12 @@ def main():
     child_to_kits: dict[str, list[str]] = {}
     kit_parent_skus: set[str] = set()  # exact normalized col-B values
 
+    last_kit_sku = ""
     for row in kits_rows[1:]:
-        kit_sku   = normalize_sku(safe_col(row, 1))  # col B
+        raw_kit = normalize_sku(safe_col(row, 1))  # col B
+        if raw_kit:
+            last_kit_sku = raw_kit
+        kit_sku   = last_kit_sku
         child_sku = normalize_sku(safe_col(row, 3))  # col D
         if kit_sku:
             kit_parent_skus.add(kit_sku)

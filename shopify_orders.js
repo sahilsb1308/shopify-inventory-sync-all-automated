@@ -940,10 +940,13 @@ async function readKitsSheet(token) {
   const kitParentSkus = new Set();  // exact normalized col-B values from kits sheet
   const len = Math.max(kitSkus.length, childSkus.length);
 
+  let lastKitSku = "";
   for (let i = 0; i < len; i++) {
-    const kitSku   = kitSkus[i]   ?? "";
+    // Carry forward last non-empty kit SKU to handle merged cells in col B
+    if (kitSkus[i]) lastKitSku = kitSkus[i];
+    const kitSku   = lastKitSku;
     const childSku = childSkus[i] ?? "";
-    if (kitSku)             kitParentSkus.add(kitSku);              // exact SKU from col B
+    if (kitSku)             kitParentSkus.add(kitSku);
     if (kitSku && childSku) (childToKits[childSku] ??= []).push(kitSku);
   }
 

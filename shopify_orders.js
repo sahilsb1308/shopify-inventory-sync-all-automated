@@ -1192,113 +1192,187 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
 // Main
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ─── Mother WH stock → D2C sheet AF column (IMPORTRANGE + classic formulas) ──
+// ─── Mother WH stock → D2C sheet AF column (direct API + JS fuzzy matching) ──
 // Strategy:
-//   AH2 = IMPORTRANGE source SKU col (F)    ← uses sheet-owner's Google credentials
-//   AI2 = IMPORTRANGE source stock col (V)
-//   AJ2 = ARRAYFORMULA(REGEXREPLACE(UPPER(AH2:AH),...))  ← pre-normalized SKUs
-//   AF (per row) = INDEX/MATCH against AJ (plain range — no ARRAYFORMULA inside MATCH)
-//   Kit rows: MIN(child lookups) with children baked in
-//   This avoids #NAME? (no LET/LAMBDA/BYROW) and #REF! (no ARRAYFORMULA inside MATCH)
+//   Read source F:V directly (service account is a viewer on the source sheet).
+//   Build a normalized SKU→stock map in JS, then bidirectional fuzzy-match each
+//   D2C row. Kit rows get MIN(child stocks). Write plain values to AF — no
+//   formulas, no IMPORTRANGE helper columns.
 async function writeMotherWHStock(token) {
-  const SRC  = `"${MOTHER_WH_SRC_ID}"`;
-  const STAB = `"${MOTHER_WH_SRC_TAB}!`;
+  const normSku = s => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
-  // Helper cols (0-indexed): AF=31, AG=32, AH=33, AI=34, AJ=35
-  const COLS_NEEDED = 36;  // need through AJ
+  // 1. Read source sheet F:V (SKU in F, stock in V; data starts at MOTHER_WH_SRC_START)
+  const srcRes = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${MOTHER_WH_SRC_ID}/values/${encodeURIComponent(`${MOTHER_WH_SRC_TAB}!F${MOTHER_WH_SRC_START}:V`)}`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  if (srcRes.statusCode !== 200) throw new Error(`Source sheet read failed: ${srcRes.statusCode}`);
+  const srcRows = JSON.parse(srcRes.body).values ?? [];
 
-  // 1. Expand D2C grid if needed
-  const expandBody = JSON.stringify({ requests: [{ appendDimension: { sheetId: D2C_TAB_GID, dimension: "COLUMNS", length: COLS_NEEDED } }] });
-  await withRetry(() => httpsRequest("POST",
-    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}:batchUpdate`,
-    expandBody, { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }));
-  // appendDimension is idempotent-ish — extra columns are harmless
+  // F=col 0, V=col 16 in the sliced range (F through V = 16 apart)
+  const SRC_SKU_IDX = 0, SRC_STK_IDX = 16;
 
-  // 2. Write helper cols AH, AI, AJ (always refresh so they stay correct)
-  const helperData = [
-    // AH = source SKU column (F), data from row 5 of source
-    { range: `${D2C_TAB}!AH1`, values: [["_src_sku"]] },
-    { range: `${D2C_TAB}!AH2`, values: [[`=IMPORTRANGE(${SRC}${STAB}F5:F")`]] },
-    // AI = source stock column (V)
-    { range: `${D2C_TAB}!AI1`, values: [["_src_stock"]] },
-    { range: `${D2C_TAB}!AI2`, values: [[`=IMPORTRANGE(${SRC}${STAB}V5:V")`]] },
-    // AJ = normalized source SKUs (ARRAYFORMULA at column top — NOT inside each AF formula)
-    { range: `${D2C_TAB}!AJ1`, values: [["_src_sku_norm"]] },
-    { range: `${D2C_TAB}!AJ2`, values: [[`=ARRAYFORMULA(IF(AH2:AH="","",REGEXREPLACE(UPPER(AH2:AH),"[^A-Z0-9]","")))`]] },
-    // AF header
-    { range: `${D2C_TAB}!AF1`, values: [["Mother Warehouse Total Inventory"]] },
-  ];
-  const hRes = await withRetry(() => httpsRequest("POST",
-    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
-    JSON.stringify({ valueInputOption: "USER_ENTERED", data: helperData }),
-    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }));
-  if (JSON.parse(hRes.body).error) throw new Error(`Helper cols write failed: ${hRes.body}`);
+  // Build: normalizedSku → [stock_row1, stock_row2, ...] (preserve order — each row is one shade/variant)
+  // Source repeats base SKU (e.g. "SB-05") once per shade; the shade index in the D2C SKU suffix
+  // (-01, -02 …) maps to the row position in this array.
+  const sourceRows = new Map();
+  for (const row of srcRows) {
+    const sku   = (row[SRC_SKU_IDX] ?? "").trim();
+    const stock = Number(row[SRC_STK_IDX] ?? 0) || 0;
+    if (!sku) continue;
+    const n = normSku(sku);
+    if (!n) continue;
+    if (!sourceRows.has(n)) sourceRows.set(n, []);
+    sourceRows.get(n).push(stock);
+  }
+  console.log(`  Source: ${srcRows.length} rows → ${sourceRows.size} unique normalized base SKUs`);
 
-  // Lookup formula against AJ (pre-normalized plain range — no ARRAYFORMULA inside MATCH)
-  // Exact norm match, then 6-char prefix fallback
-  function stockFormula(skuExpr, isLiteral) {
-    const val   = isLiteral ? `"${skuExpr}"` : skuExpr;
-    const lnorm = `REGEXREPLACE(UPPER(${val}),"[^A-Z0-9]","")`;
-    const idx1  = `IFERROR(MATCH(${lnorm},AJ$2:AJ$2000,0),0)`;
-    const idx2  = `IFERROR(MATCH(LEFT(${lnorm},6),ARRAYFORMULA(LEFT(AJ$2:AJ$2000,6)),0),0)`;
-    return `IFERROR(INDEX(AI$2:AI$2000,IF(${idx1}>0,${idx1},${idx2})),0)`;
+  // Bidirectional fuzzy lookup — returns stock number, or null if SKU not found in source.
+  //   1. Exact normalized match → sum all rows for that exact norm (same SKU, multiple batches)
+  //   2. Prefix match (source base is prefix of D2C variant, e.g. "SB-05" ← "SB-05-02"):
+  //      Parse the numeric shade index from the D2C SKU suffix (-02 → index 2) and return
+  //      the stock of that specific shade row. Fallback to sum if no numeric suffix.
+  //   Require >= 4 chars overlap on prefix matches to avoid false positives.
+  //   Returns null when no match found.
+  function findStock(querySku) {
+    if (!querySku) return null;
+    const q = normSku(querySku);
+    if (!q) return null;
+
+    // Exact match: sum all rows (same exact variant, possibly split across batches)
+    if (sourceRows.has(q)) return sourceRows.get(q).reduce((a, b) => a + b, 0);
+
+    // Prefix match: find best (longest overlap) base SKU in source
+    let bestBase = null, bestLen = 0;
+    for (const srcN of sourceRows.keys()) {
+      if (q.startsWith(srcN) || srcN.startsWith(q)) {
+        const overlap = Math.min(q.length, srcN.length);
+        if (overlap > bestLen) { bestLen = overlap; bestBase = srcN; }
+      }
+    }
+    if (bestLen < 4 || !bestBase) return null;
+
+    const rows = sourceRows.get(bestBase);
+
+    // Parse numeric shade index from the D2C SKU suffix (e.g. "SB-05-02" → 2)
+    const shadeMatch = querySku.match(/-0*(\d+)$/);
+    if (shadeMatch) {
+      const idx = parseInt(shadeMatch[1], 10) - 1; // suffix is 1-indexed
+      if (idx >= 0 && idx < rows.length) return rows[idx];
+    }
+
+    // No parseable shade index → sum all rows for the base SKU
+    return rows.reduce((a, b) => a + b, 0);
   }
 
-  // 3. Read D2C SKUs and kits
-  const [d2cSkuRes, kitsRes] = await Promise.all([
-    withRetry(() => httpsGet(`https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!B2:B500`)}`, { Authorization: `Bearer ${token}` })),
+  // 2. Read D2C SKUs and kits tab in parallel
+  const [d2cRes, kitsRes] = await Promise.all([
+    withRetry(() => httpsGet(`https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!B2:B2000`)}`, { Authorization: `Bearer ${token}` })),
     withRetry(() => httpsGet(`https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_KITS_TAB}!B2:D300`)}`, { Authorization: `Bearer ${token}` })),
   ]);
-  if (d2cSkuRes.statusCode !== 200) throw new Error(`D2C SKU read failed: ${d2cSkuRes.statusCode}`);
+  const d2cSkus = (JSON.parse(d2cRes.body).values ?? []).map(r => (r[0] ?? "").trim());
 
-  const d2cSkus = (JSON.parse(d2cSkuRes.body).values ?? []).map(r => (r[0] ?? "").trim());
-
+  // Build kitChildren map: parentSku → [childSku, ...]
   const kitChildren = new Map();
   let curKit = "";
   for (const r of (JSON.parse(kitsRes.body).values ?? [])) {
     const kp = (r[0] ?? "").trim(), ch = (r[2] ?? "").trim();
     if (kp) curKit = kp;
-    if (curKit && ch) (kitChildren.get(curKit) ?? kitChildren.set(curKit, []).get(curKit)).push(ch);
+    if (curKit && ch) {
+      if (!kitChildren.has(curKit)) kitChildren.set(curKit, []);
+      kitChildren.get(curKit).push(ch);
+    }
   }
 
+  // Match a D2C SKU to a kit parent — bidirectional prefix so suffix variants (e.g. -V, -02)
+  // still resolve to the correct kit parent in the kits tab.
   function matchKitParent(sku) {
     const u = sku.toUpperCase();
-    for (const kp of kitChildren.keys()) if (u.startsWith(kp.toUpperCase())) return kp;
+    const q = normSku(sku);
+    // Exact startsWith first (fastest and most reliable)
+    for (const kp of kitChildren.keys()) {
+      if (u.startsWith(kp.toUpperCase())) return kp;
+    }
+    // Normalized bidirectional prefix fallback
+    for (const kp of kitChildren.keys()) {
+      const kn = normSku(kp);
+      if (q.startsWith(kn) || kn.startsWith(q)) return kp;
+    }
     return null;
   }
 
-  // 4. Build per-row AF formulas
+  // 3. Compute AF value for every D2C row
   const afData = [];
+  let kitRows = 0, nonKitFound = 0, notFound = 0;
+
   for (let i = 0; i < d2cSkus.length; i++) {
     const sku = d2cSkus[i];
     const row = i + 2;
     if (!sku) { afData.push({ range: `${D2C_TAB}!AF${row}`, values: [[""]] }); continue; }
 
-    const kit = matchKitParent(sku);
-    let formula;
-    if (kit) {
-      const children = kitChildren.get(kit) ?? [];
-      formula = `=MIN(${children.map(c => stockFormula(c, true)).join(",")})`;
+    const kitParent = matchKitParent(sku);
+    let value;
+
+    if (kitParent) {
+      // Kit row: MIN stock across child SKUs that are found in source.
+      // Unmatched children are skipped — they may be tracked in a different warehouse.
+      // This gives MIN of the scarcest *known* component.
+      const children = kitChildren.get(kitParent) ?? [];
+      const foundStocks = children.map(c => findStock(c)).filter(s => s !== null);
+      value = foundStocks.length > 0 ? Math.min(...foundStocks) : 0;
+      kitRows++;
     } else {
-      formula = `=${stockFormula(`B${row}`, false)}`;
+      const s = findStock(sku);
+      value = s !== null ? s : 0;
+      if (value > 0) nonKitFound++; else notFound++;
     }
-    afData.push({ range: `${D2C_TAB}!AF${row}`, values: [[formula]] });
+
+    afData.push({ range: `${D2C_TAB}!AF${row}`, values: [[value]] });
   }
 
-  // 5. Write AF formulas in chunks
+  // 4. Write AF header + values in chunks
+  await withRetry(() => httpsRequest("POST",
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
+    JSON.stringify({ valueInputOption: "USER_ENTERED", data: [{ range: `${D2C_TAB}!AF1`, values: [["Mother Warehouse Total Inventory"]] }] }),
+    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  ));
+
   const CHUNK = 150;
   for (let i = 0; i < afData.length; i += CHUNK) {
     const res = await withRetry(() => httpsRequest("POST",
       `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
       JSON.stringify({ valueInputOption: "USER_ENTERED", data: afData.slice(i, i + CHUNK) }),
-      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }));
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    ));
     if (JSON.parse(res.body).error) throw new Error(`AF write chunk ${i} failed: ${res.body}`);
   }
 
-  const kitCount = d2cSkus.filter(s => s && matchKitParent(s)).length;
-  console.log(`  ✓ AF formulas written: ${d2cSkus.filter(Boolean).length} rows (${kitCount} kit rows → MIN child stock)`);
-  console.log(`  ↳ AH/AI = IMPORTRANGE (live from source), AJ = normalized SKUs, AF = INDEX/MATCH`);
-  console.log(`  ↳ AH, AI, AJ are helper cols — you can hide them`);
+  // 5. Clear old IMPORTRANGE helper cols AH–AK (no longer needed)
+  await withRetry(() => httpsRequest("POST",
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchClear`,
+    JSON.stringify({ ranges: [`${D2C_TAB}!AH1:AK2000`] }),
+    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  ));
+
+  // 6. Trim sheet to exactly AF (col 32 = index 31); delete any extra columns beyond
+  const sheetMeta = JSON.parse((await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}?fields=sheets(properties(sheetId,gridProperties))`,
+    { Authorization: `Bearer ${token}` }
+  ))).body);
+  const d2cSheet = (sheetMeta.sheets ?? []).find(s => s.properties.sheetId === D2C_TAB_GID);
+  const colCount = d2cSheet?.properties?.gridProperties?.columnCount ?? 0;
+  const TARGET_COLS = 32; // through AF (col 32, 1-indexed)
+  if (colCount > TARGET_COLS) {
+    await withRetry(() => httpsRequest("POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}:batchUpdate`,
+      JSON.stringify({ requests: [{ deleteDimension: { range: { sheetId: D2C_TAB_GID, dimension: "COLUMNS", startIndex: TARGET_COLS, endIndex: colCount } } }] }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    ));
+    console.log(`  ✓ Trimmed ${colCount - TARGET_COLS} extra columns (now exactly AF)`);
+  }
+
+  console.log(`  ✓ AF written: ${afData.length} rows — ${kitRows} kit rows (MIN child stock), ${nonKitFound} non-kit matched, ${notFound} not found in source`);
+  console.log(`  ✓ Helper cols AH–AK cleared (direct API read replaces IMPORTRANGE)`);
 }
 
 async function main() {

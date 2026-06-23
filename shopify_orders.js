@@ -1125,15 +1125,31 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
 
       const { npdFlag, npd, promoQ, isBestseller } = rowState.get(i) ?? {};
       const newM = Math.max(
-        Number(npdFlag) === 1       ? 6   : 0,
+        Number(npdFlag) === 1               ? 6   : 0,
         (npd ?? "").toUpperCase() === "NPD" ? 1.8 : 0,
-        Number(promoQ) === 1        ? 1.5 : 0,
-        isBestseller === 1          ? 1.2 : 0,
+        Number(promoQ) === 1                ? 1.5 : 0,
+        isBestseller === 1                  ? 1.2 : 0,
         pMap["P0"],
       );
       colM[i] = [newM];
+
+      // Recalculate demand columns with the new multiplier
+      const drrRaw2   = (uVals[i]?.[0] ?? "").trim();
+      const drr2      = drrRaw2 === "" ? null : (parseFloat(drrRaw2) || 0);
+      const gVal2     = parseFloat((gVals[i]?.[0] ?? "0")) || 0;
+      const nVal2     = parseFloat((nVals[i]?.[0] ?? "0")) || 0;
+      const kVal2     = parseFloat((kVals[i]?.[0] ?? "0").replace(/,/g, "")) || 0;
+      const kitContrib2 = (childToKits[sku] ?? []).reduce((sum, kitSku) =>
+        sum + (skuToK[kitSku] ?? prefixToK[skuPrefix(kitSku)] ?? 0), 0);
+      const demand7d2  = parseFloat((((drr2 ?? 0) *  7 + kitContrib2 * 7 / 30) * newM).toFixed(2));
+      const demand30d2 = parseFloat((((drr2 ?? 0) * 30 + kitContrib2          ) * newM).toFixed(2));
+      const asp2       = kVal2 > 0 ? nVal2 / kVal2 : 0;
+      colW[i]  = [demand7d2];
+      colX[i]  = [demand30d2];
+      colY[i]  = [parseFloat((demand30d2 * asp2).toFixed(2))];
+      colAD[i] = [Math.max(0, parseFloat((demand30d2 - gVal2).toFixed(2)))];
     }
-    if (promoted > 0) console.log(`  ✓ Promoted ${promoted} child SKU(s) to P0 via kit parent`);
+    if (promoted > 0) console.log(`  ✓ Promoted ${promoted} child SKU(s) to P0 via kit parent (demand recalculated)`);
   }
 
   const make = col => `${SHEET_TAB}!${col}${DATA_START_ROW}:${col}${lastRow}`;

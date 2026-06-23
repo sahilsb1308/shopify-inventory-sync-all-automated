@@ -1007,6 +1007,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
   const colAB = Array.from({ length: totalRows }, () => [0]);
   const colAC = Array.from({ length: totalRows }, () => [0]);
   const colAD = Array.from({ length: totalRows }, () => [""]);
+  const rowState = new Map(); // i → {npdFlag, npd, promoQ, isBestseller} for second pass
 
   for (const { sku, row, priority } of skuRows) {
     const i       = row - DATA_START_ROW;
@@ -1029,6 +1030,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     // Col R — Bestseller: 1 if N ≥ median of all non-blank N values
     const isBestseller = nRaw !== "" && nVal >= nMedian ? 1 : 0;
     colR[i] = [isBestseller];
+    rowState.set(i, { npdFlag, npd, promoQ, isBestseller });
 
     // Col T — Total Available Stock = G + I + J (0 if any blank)
     if (gRaw === "" || iRaw === "" || jRaw === "") {
@@ -1096,6 +1098,42 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     colX[i]  = [demand30d];
     colY[i]  = [parseFloat((demand30d * asp).toFixed(2))];
     colAD[i] = [Math.max(0, parseFloat((demand30d - gVal).toFixed(2)))];
+  }
+
+  // Second pass: promote child SKUs to P0 if any of their parent kits are P0
+  {
+    const skuPriorityMap = new Map();
+    for (const { sku, row } of skuRows) skuPriorityMap.set(sku, colAA[row - DATA_START_ROW][0]);
+
+    const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
+    let promoted = 0;
+    for (const { sku, row } of skuRows) {
+      const i = row - DATA_START_ROW;
+      if (!(sku in childToKits)) continue;
+      if (colAA[i][0] === "P0") continue;
+
+      const anyParentP0 = (childToKits[sku] ?? []).some(kitSku => {
+        if (skuPriorityMap.get(kitSku) === "P0") return true;
+        const pfx = skuPrefix(kitSku);
+        for (const [s, pri] of skuPriorityMap) if (skuPrefix(s) === pfx && pri === "P0") return true;
+        return false;
+      });
+      if (!anyParentP0) continue;
+
+      colAA[i] = ["P0"];
+      promoted++;
+
+      const { npdFlag, npd, promoQ, isBestseller } = rowState.get(i) ?? {};
+      const newM = Math.max(
+        Number(npdFlag) === 1       ? 6   : 0,
+        (npd ?? "").toUpperCase() === "NPD" ? 1.8 : 0,
+        Number(promoQ) === 1        ? 1.5 : 0,
+        isBestseller === 1          ? 1.2 : 0,
+        pMap["P0"],
+      );
+      colM[i] = [newM];
+    }
+    if (promoted > 0) console.log(`  ✓ Promoted ${promoted} child SKU(s) to P0 via kit parent`);
   }
 
   const make = col => `${SHEET_TAB}!${col}${DATA_START_ROW}:${col}${lastRow}`;

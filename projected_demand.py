@@ -181,6 +181,12 @@ def main():
         if kit_sku and child_sku:
             child_to_kits.setdefault(child_sku, []).append(kit_sku)
 
+    # ── Build reverse map: kit parent SKU → [child SKUs] (for AF min logic) ──
+    parent_to_children: dict[str, list[str]] = {}
+    for child_sku, parents in child_to_kits.items():
+        for parent_sku in parents:
+            parent_to_children.setdefault(parent_sku, []).append(child_sku)
+
     # ── Build prefix → total-sold-30d lookup ─────────────────────────────────
     prefix_to_k: dict[str, float] = {}
     for row in dash_rows[1:]:
@@ -291,8 +297,12 @@ def main():
             units_fill_results.append(blank)
             continue
 
-        # Rule 2: kit parent → 0 demand
+        # Rule 2: kit parent → 0 demand; AF = min of children's Mother Warehouse Inventory
         if sku_prefix(norm_sku) in kit_parent_skus or norm_sku in kit_parent_skus:
+            children    = parent_to_children.get(norm_sku, [])
+            child_vals  = [to_float(src_sku_to_doi.get(c, "")) for c in children]
+            child_vals  = [v for v in child_vals if v is not None]
+            mw_inv_results[-1] = [min(child_vals)] if child_vals else [""]
             doi_results.append(blank)
             stock_status_results.append(blank)
             demand_7d_results.append([0])

@@ -39,6 +39,10 @@ DASHBOARD_TAB = "Inventory Dashboard"
 KITS_TAB      = "Kits - Child SKUs"
 DATA_START_ROW = 2
 
+# Source sheet: shopify_orders.js writes col V (Days of Inventory) here.
+# Col A (variant SKU) is the join key; col V value is copied to col AF here.
+SOURCE_SHEET_ID = "1Y2EaDjGfMwscmpn9h7oR_mTOSVxErqWHeowftX01KdI"
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # ─── Column indices (0-based) ─────────────────────────────────────────────────
@@ -66,6 +70,7 @@ COL_REV_CONTRIB = 27  # AB – Revenue Contribution % (output)
 COL_FILL_RATE   = 28  # AC – Fill Rate (output)
 COL_UNITS_FILL  = 29  # AD – Units to be Filled (output)
 COL_NPD_FLAG    = 30  # AE – NPD numeric flag
+COL_MW_INV      = 31  # AF – Mother Warehouse Inventory (from source sheet col V)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -147,6 +152,19 @@ def main():
     print("Reading Kits - Child SKUs sheet...")
     kits_rows = kits_sheet.get_all_values()
 
+    # ── Build col-A → col-V lookup from source sheet (for AF) ────────────────
+    print("Reading source sheet for Mother Warehouse Inventory (col V)...")
+    source_spreadsheet = gc.open_by_key(SOURCE_SHEET_ID)
+    source_dashboard   = source_spreadsheet.worksheet(DASHBOARD_TAB)
+    source_rows        = source_dashboard.get_all_values()
+    src_sku_to_doi: dict[str, str] = {}
+    for src_row in source_rows[1:]:
+        src_sku = normalize_sku(safe_col(src_row, 0))   # col A – variant SKU
+        doi_raw = safe_col(src_row, 21)                  # col V – Days of Inventory
+        if src_sku:
+            src_sku_to_doi[src_sku] = doi_raw
+    print(f"  {len(src_sku_to_doi)} SKUs loaded from source sheet col A→V")
+
     # ── Parse Kits sheet ──────────────────────────────────────────────────────
     child_to_kits: dict[str, list[str]] = {}
     kit_parent_skus: set[str] = set()  # exact normalized col-B values
@@ -201,6 +219,7 @@ def main():
     rev_contrib_results = []
     fill_rate_results  = []
     units_fill_results = []
+    mw_inv_results     = []
 
     blank = [""]
 
@@ -210,9 +229,14 @@ def main():
             for lst in (multiplier_results, bestseller_results, total_stock_results,
                         drr_results, doi_results, demand_7d_results, demand_results,
                         proj_rev_results, stock_status_results, priority_results,
-                        rev_contrib_results, fill_rate_results, units_fill_results):
+                        rev_contrib_results, fill_rate_results, units_fill_results,
+                        mw_inv_results):
                 lst.append(blank)
             continue
+
+        # AF – Mother Warehouse Inventory: col V from source sheet, matched by col A variant SKU
+        norm_sku = normalize_sku(sku)
+        mw_inv_results.append([src_sku_to_doi.get(norm_sku, "")])
 
         # Raw values
         g_val    = to_float(safe_col(row, COL_STOCK),   default=0) or 0
@@ -255,7 +279,7 @@ def main():
         fill_rate = round((k_val + g_val) / s_val, 4) if s_val != 0 else 0
         fill_rate_results.append([fill_rate])
 
-        is_child = sku in child_to_kits
+        is_child = norm_sku in child_to_kits
 
         # Rule 1: no DRR and not a kit child → blank derived columns
         if drr is None and not is_child:
@@ -268,7 +292,6 @@ def main():
             continue
 
         # Rule 2: kit parent → 0 demand
-        norm_sku = normalize_sku(sku)
         if sku_prefix(norm_sku) in kit_parent_skus or norm_sku in kit_parent_skus:
             doi_results.append(blank)
             stock_status_results.append(blank)
@@ -318,19 +341,20 @@ def main():
     last_row = DATA_START_ROW + n_rows - 1
 
     ranges = {
-        "M": multiplier_results,
-        "R": bestseller_results,
-        "T": total_stock_results,
-        "U": drr_results,
-        "V": doi_results,
-        "W": demand_7d_results,
-        "X": demand_results,
-        "Y": proj_rev_results,
-        "Z": stock_status_results,
+        "M":  multiplier_results,
+        "R":  bestseller_results,
+        "T":  total_stock_results,
+        "U":  drr_results,
+        "V":  doi_results,
+        "W":  demand_7d_results,
+        "X":  demand_results,
+        "Y":  proj_rev_results,
+        "Z":  stock_status_results,
         "AA": priority_results,
         "AB": rev_contrib_results,
         "AC": fill_rate_results,
         "AD": units_fill_results,
+        "AF": mw_inv_results,
     }
 
     updates = []

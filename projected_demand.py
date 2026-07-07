@@ -159,11 +159,11 @@ def main():
     source_rows        = source_dashboard.get_all_values()
     src_sku_to_doi: dict[str, str] = {}
     for src_row in source_rows[1:]:
-        src_sku = normalize_sku(safe_col(src_row, 0))   # col A – variant SKU
+        src_sku = normalize_sku(safe_col(src_row, 1))   # col B – variant SKU (matches destination col B)
         doi_raw = safe_col(src_row, 21)                  # col V – Days of Inventory
         if src_sku:
             src_sku_to_doi[src_sku] = doi_raw
-    print(f"  {len(src_sku_to_doi)} SKUs loaded from source sheet col A→V")
+    print(f"  {len(src_sku_to_doi)} SKUs loaded from source sheet col B→V")
 
     # ── Parse Kits sheet ──────────────────────────────────────────────────────
     child_to_kits: dict[str, list[str]] = {}

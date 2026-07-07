@@ -159,11 +159,11 @@ def main():
     source_rows        = source_dashboard.get_all_values()
     src_sku_to_doi: dict[str, str] = {}
     for src_row in source_rows[1:]:
-        src_sku = normalize_sku(safe_col(src_row, 1))   # col B – variant SKU (matches destination col B)
-        doi_raw = safe_col(src_row, 21)                  # col V – Days of Inventory
+        src_sku = normalize_sku(safe_col(src_row, 0))   # col A – variant-level SKU
+        doi_raw = safe_col(src_row, 21)                  # col V – Mother Warehouse Inventory stock
         if src_sku:
             src_sku_to_doi[src_sku] = doi_raw
-    print(f"  {len(src_sku_to_doi)} SKUs loaded from source sheet col B→V")
+    print(f"  {len(src_sku_to_doi)} SKUs loaded from source sheet col A→V")
 
     # ── Parse Kits sheet ──────────────────────────────────────────────────────
     child_to_kits: dict[str, list[str]] = {}
@@ -240,7 +240,7 @@ def main():
                 lst.append(blank)
             continue
 
-        # AF – Mother Warehouse Inventory: col V from source sheet, matched by col A variant SKU
+        # AF – Mother Warehouse Inventory: col V stock from source sheet, matched by col A variant SKU
         norm_sku = normalize_sku(sku)
         mw_inv_results.append([src_sku_to_doi.get(norm_sku, "")])
 

@@ -1201,16 +1201,16 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
 async function writeMotherWHStock(token) {
   const normSku = s => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
-  // 1. Read source sheet F:V (SKU in F, stock in V; data starts at MOTHER_WH_SRC_START)
+  // 1. Read source sheet A:V (SKU in A, stock in V; data starts at MOTHER_WH_SRC_START)
   const srcRes = await withRetry(() => httpsGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${MOTHER_WH_SRC_ID}/values/${encodeURIComponent(`${MOTHER_WH_SRC_TAB}!F${MOTHER_WH_SRC_START}:V`)}`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${MOTHER_WH_SRC_ID}/values/${encodeURIComponent(`${MOTHER_WH_SRC_TAB}!A${MOTHER_WH_SRC_START}:V`)}`,
     { Authorization: `Bearer ${token}` }
   ));
   if (srcRes.statusCode !== 200) throw new Error(`Source sheet read failed: ${srcRes.statusCode}`);
   const srcRows = JSON.parse(srcRes.body).values ?? [];
 
-  // F=col 0, V=col 16 in the sliced range (F through V = 16 apart)
-  const SRC_SKU_IDX = 0, SRC_STK_IDX = 16;
+  // A=col 0, V=col 21 in the sliced range (A through V = 21 apart)
+  const SRC_SKU_IDX = 0, SRC_STK_IDX = 21;
 
   // Build: normalizedSku → [stock_row1, stock_row2, ...] (preserve order — each row is one shade/variant)
   // Source repeats base SKU (e.g. "SB-05") once per shade; the shade index in the D2C SKU suffix

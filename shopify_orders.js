@@ -1192,16 +1192,14 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
 // Main
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ─── Mother WH stock → D2C sheet AF column (direct API + JS fuzzy matching) ──
-// Strategy:
-//   Read source F:V directly (service account is a viewer on the source sheet).
-//   Build a normalized SKU→stock map in JS, then bidirectional fuzzy-match each
-//   D2C row. Kit rows get MIN(child stocks). Write plain values to AF — no
-//   formulas, no IMPORTRANGE helper columns.
+// ─── Mother WH stock → D2C sheet AF column ───────────────────────────────────
+// Reads source sheet col A (variant SKU) and col V (stock) — one row per variant.
+// Exact SKU match only; no prefix/shade-index summing.
+// Kit parents get MIN(children stocks). Non-kit rows get their own individual value.
 async function writeMotherWHStock(token) {
   const normSku = s => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
-  // 1. Read source sheet A:V (SKU in A, stock in V; data starts at MOTHER_WH_SRC_START)
+  // 1. Read source sheet A:V (SKU in col A, stock in col V; data starts at MOTHER_WH_SRC_START)
   const srcRes = await withRetry(() => httpsGet(
     `https://sheets.googleapis.com/v4/spreadsheets/${MOTHER_WH_SRC_ID}/values/${encodeURIComponent(`${MOTHER_WH_SRC_TAB}!A${MOTHER_WH_SRC_START}:V`)}`,
     { Authorization: `Bearer ${token}` }
@@ -1212,9 +1210,7 @@ async function writeMotherWHStock(token) {
   // A=col 0, V=col 21 in the sliced range (A through V = 21 apart)
   const SRC_SKU_IDX = 0, SRC_STK_IDX = 21;
 
-  // Build: normalizedSku → [stock_row1, stock_row2, ...] (preserve order — each row is one shade/variant)
-  // Source repeats base SKU (e.g. "SB-05") once per shade; the shade index in the D2C SKU suffix
-  // (-01, -02 …) maps to the row position in this array.
+  // Build: normalizedSku → stock (col A has variant-level SKUs, one row per variant)
   const sourceRows = new Map();
   for (const row of srcRows) {
     const sku   = (row[SRC_SKU_IDX] ?? "").trim();
@@ -1222,47 +1218,18 @@ async function writeMotherWHStock(token) {
     if (!sku) continue;
     const n = normSku(sku);
     if (!n) continue;
-    if (!sourceRows.has(n)) sourceRows.set(n, []);
-    sourceRows.get(n).push(stock);
+    // Keep first occurrence — source has one row per variant SKU
+    if (!sourceRows.has(n)) sourceRows.set(n, stock);
   }
-  console.log(`  Source: ${srcRows.length} rows → ${sourceRows.size} unique normalized base SKUs`);
+  console.log(`  Source: ${srcRows.length} rows → ${sourceRows.size} unique variant SKUs`);
 
-  // Bidirectional fuzzy lookup — returns stock number, or null if SKU not found in source.
-  //   1. Exact normalized match → sum all rows for that exact norm (same SKU, multiple batches)
-  //   2. Prefix match (source base is prefix of D2C variant, e.g. "SB-05" ← "SB-05-02"):
-  //      Parse the numeric shade index from the D2C SKU suffix (-02 → index 2) and return
-  //      the stock of that specific shade row. Fallback to sum if no numeric suffix.
-  //   Require >= 4 chars overlap on prefix matches to avoid false positives.
-  //   Returns null when no match found.
+  // Exact normalized match only — col A has variant-level SKUs so no fuzzy logic needed.
+  // Returns stock number, or null if SKU not found in source.
   function findStock(querySku) {
     if (!querySku) return null;
     const q = normSku(querySku);
     if (!q) return null;
-
-    // Exact match: sum all rows (same exact variant, possibly split across batches)
-    if (sourceRows.has(q)) return sourceRows.get(q).reduce((a, b) => a + b, 0);
-
-    // Prefix match: find best (longest overlap) base SKU in source
-    let bestBase = null, bestLen = 0;
-    for (const srcN of sourceRows.keys()) {
-      if (q.startsWith(srcN) || srcN.startsWith(q)) {
-        const overlap = Math.min(q.length, srcN.length);
-        if (overlap > bestLen) { bestLen = overlap; bestBase = srcN; }
-      }
-    }
-    if (bestLen < 4 || !bestBase) return null;
-
-    const rows = sourceRows.get(bestBase);
-
-    // Parse numeric shade index from the D2C SKU suffix (e.g. "SB-05-02" → 2)
-    const shadeMatch = querySku.match(/-0*(\d+)$/);
-    if (shadeMatch) {
-      const idx = parseInt(shadeMatch[1], 10) - 1; // suffix is 1-indexed
-      if (idx >= 0 && idx < rows.length) return rows[idx];
-    }
-
-    // No parseable shade index → sum all rows for the base SKU
-    return rows.reduce((a, b) => a + b, 0);
+    return sourceRows.has(q) ? sourceRows.get(q) : null;
   }
 
   // 2. Read D2C SKUs and kits tab in parallel
@@ -1284,19 +1251,12 @@ async function writeMotherWHStock(token) {
     }
   }
 
-  // Match a D2C SKU to a kit parent — bidirectional prefix so suffix variants (e.g. -V, -02)
-  // still resolve to the correct kit parent in the kits tab.
+  // Match a D2C SKU to a kit parent — exact normalized match only.
+  // Product variants (SB-417-401) must NOT match the kit parent (SB-417).
   function matchKitParent(sku) {
-    const u = sku.toUpperCase();
-    const q = normSku(sku);
-    // Exact startsWith first (fastest and most reliable)
+    const u = sku.toUpperCase().trim();
     for (const kp of kitChildren.keys()) {
-      if (u.startsWith(kp.toUpperCase())) return kp;
-    }
-    // Normalized bidirectional prefix fallback
-    for (const kp of kitChildren.keys()) {
-      const kn = normSku(kp);
-      if (q.startsWith(kn) || kn.startsWith(q)) return kp;
+      if (u === kp.toUpperCase().trim()) return kp;
     }
     return null;
   }

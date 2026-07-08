@@ -39,9 +39,6 @@ DASHBOARD_TAB = "Inventory Dashboard"
 KITS_TAB      = "Kits - Child SKUs"
 DATA_START_ROW = 2
 
-# Source sheet: shopify_orders.js writes col V (Days of Inventory) here.
-# Col A (variant SKU) is the join key; col V value is copied to col AF here.
-SOURCE_SHEET_ID = "1Y2EaDjGfMwscmpn9h7oR_mTOSVxErqWHeowftX01KdI"
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -70,7 +67,6 @@ COL_REV_CONTRIB = 27  # AB – Revenue Contribution % (output)
 COL_FILL_RATE   = 28  # AC – Fill Rate (output)
 COL_UNITS_FILL  = 29  # AD – Units to be Filled (output)
 COL_NPD_FLAG    = 30  # AE – NPD numeric flag
-COL_MW_INV      = 31  # AF – Mother Warehouse Inventory (from source sheet col V)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -152,19 +148,6 @@ def main():
     print("Reading Kits - Child SKUs sheet...")
     kits_rows = kits_sheet.get_all_values()
 
-    # ── Build col-A → col-V lookup from source sheet (for AF) ────────────────
-    print("Reading source sheet for Mother Warehouse Inventory (col V)...")
-    source_spreadsheet = gc.open_by_key(SOURCE_SHEET_ID)
-    source_dashboard   = source_spreadsheet.worksheet(DASHBOARD_TAB)
-    source_rows        = source_dashboard.get_all_values()
-    src_sku_to_doi: dict[str, str] = {}
-    for src_row in source_rows[1:]:
-        src_sku = normalize_sku(safe_col(src_row, 0))   # col A – variant-level SKU
-        doi_raw = safe_col(src_row, 21)                  # col V – Mother Warehouse Inventory stock
-        if src_sku:
-            src_sku_to_doi[src_sku] = doi_raw
-    print(f"  {len(src_sku_to_doi)} SKUs loaded from source sheet col A→V")
-
     # ── Parse Kits sheet ──────────────────────────────────────────────────────
     child_to_kits: dict[str, list[str]] = {}
     kit_parent_skus: set[str] = set()  # exact normalized col-B values
@@ -180,12 +163,6 @@ def main():
             kit_parent_skus.add(kit_sku)
         if kit_sku and child_sku:
             child_to_kits.setdefault(child_sku, []).append(kit_sku)
-
-    # ── Build reverse map: kit parent SKU → [child SKUs] (for AF min logic) ──
-    parent_to_children: dict[str, list[str]] = {}
-    for child_sku, parents in child_to_kits.items():
-        for parent_sku in parents:
-            parent_to_children.setdefault(parent_sku, []).append(child_sku)
 
     # ── Build prefix → total-sold-30d lookup ─────────────────────────────────
     prefix_to_k: dict[str, float] = {}
@@ -225,7 +202,6 @@ def main():
     rev_contrib_results = []
     fill_rate_results  = []
     units_fill_results = []
-    mw_inv_results     = []
 
     blank = [""]
 
@@ -235,14 +211,11 @@ def main():
             for lst in (multiplier_results, bestseller_results, total_stock_results,
                         drr_results, doi_results, demand_7d_results, demand_results,
                         proj_rev_results, stock_status_results, priority_results,
-                        rev_contrib_results, fill_rate_results, units_fill_results,
-                        mw_inv_results):
+                        rev_contrib_results, fill_rate_results, units_fill_results):
                 lst.append(blank)
             continue
 
-        # AF – Mother Warehouse Inventory: col V stock from source sheet, matched by col A variant SKU
         norm_sku = normalize_sku(sku)
-        mw_inv_results.append([src_sku_to_doi.get(norm_sku, "")])
 
         # Raw values
         g_val    = to_float(safe_col(row, COL_STOCK),   default=0) or 0
@@ -297,12 +270,8 @@ def main():
             units_fill_results.append(blank)
             continue
 
-        # Rule 2: kit parent → 0 demand; AF = min of children's Mother Warehouse Inventory
+        # Rule 2: kit parent → 0 demand
         if sku_prefix(norm_sku) in kit_parent_skus or norm_sku in kit_parent_skus:
-            children    = parent_to_children.get(norm_sku, [])
-            child_vals  = [to_float(src_sku_to_doi.get(c, "")) for c in children]
-            child_vals  = [v for v in child_vals if v is not None]
-            mw_inv_results[-1] = [min(child_vals)] if child_vals else [""]
             doi_results.append(blank)
             stock_status_results.append(blank)
             demand_7d_results.append([0])
@@ -364,7 +333,6 @@ def main():
         "AB": rev_contrib_results,
         "AC": fill_rate_results,
         "AD": units_fill_results,
-        "AF": mw_inv_results,
     }
 
     updates = []

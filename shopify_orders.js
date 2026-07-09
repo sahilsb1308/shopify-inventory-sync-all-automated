@@ -1208,29 +1208,31 @@ async function writeMotherWHStock(token) {
   if (srcRes.statusCode !== 200) throw new Error(`Source sheet read failed: ${srcRes.statusCode}`);
   const srcRows = JSON.parse(srcRes.body).values ?? [];
 
-  // A=col 0, V=col 21 in the sliced range (A through V = 21 apart)
-  const SRC_SKU_IDX = 0, SRC_STK_IDX = 21;
+  // A=col 0, F=col 5, V=col 21 in the sliced range (A through V)
+  const SRC_SKU_IDX = 0, SRC_FSKU_IDX = 5, SRC_STK_IDX = 21;
 
-  // Build: normalizedSku → stock (col A has variant-level SKUs, one row per variant)
-  const sourceRows = new Map();
+  // Primary map: col A (variant SKU) → stock
+  // Fallback map: col F (parent/product SKU) → stock (used when col A has no match)
+  const sourceByA = new Map();
+  const sourceByF = new Map();
   for (const row of srcRows) {
-    const sku   = (row[SRC_SKU_IDX] ?? "").trim();
+    const skuA  = (row[SRC_SKU_IDX]  ?? "").trim();
+    const skuF  = (row[SRC_FSKU_IDX] ?? "").trim();
     const stock = Number(row[SRC_STK_IDX] ?? 0) || 0;
-    if (!sku) continue;
-    const n = normSku(sku);
-    if (!n) continue;
-    // Keep first occurrence — source has one row per variant SKU
-    if (!sourceRows.has(n)) sourceRows.set(n, stock);
+    if (skuA) { const n = normSku(skuA); if (n && !sourceByA.has(n)) sourceByA.set(n, stock); }
+    if (skuF) { const n = normSku(skuF); if (n && !sourceByF.has(n)) sourceByF.set(n, stock); }
   }
-  console.log(`  Source: ${srcRows.length} rows → ${sourceRows.size} unique variant SKUs`);
+  console.log(`  Source: ${srcRows.length} rows → ${sourceByA.size} col-A SKUs, ${sourceByF.size} col-F SKUs`);
 
-  // Exact normalized match only — col A has variant-level SKUs so no fuzzy logic needed.
-  // Returns stock number, or null if SKU not found in source.
+  // Try col A first (variant-level), fall back to col F (parent-level).
+  // Returns stock number, or null if no match found in either column.
   function findStock(querySku) {
     if (!querySku) return null;
     const q = normSku(querySku);
     if (!q) return null;
-    return sourceRows.has(q) ? sourceRows.get(q) : null;
+    if (sourceByA.has(q)) return sourceByA.get(q);
+    if (sourceByF.has(q)) return sourceByF.get(q);
+    return null;
   }
 
   // 2. Read D2C SKUs and kits tab in parallel
@@ -1275,17 +1277,15 @@ async function writeMotherWHStock(token) {
     let value;
 
     if (kitParent) {
-      // Kit row: MIN stock across child SKUs that are found in source.
-      // Unmatched children are skipped — they may be tracked in a different warehouse.
-      // This gives MIN of the scarcest *known* component.
+      // Kit row: MIN stock across child SKUs found in source. Blank if none found.
       const children = kitChildren.get(kitParent) ?? [];
       const foundStocks = children.map(c => findStock(c)).filter(s => s !== null);
-      value = foundStocks.length > 0 ? Math.min(...foundStocks) : 0;
+      value = foundStocks.length > 0 ? Math.min(...foundStocks) : "";
       kitRows++;
     } else {
       const s = findStock(sku);
-      value = s !== null ? s : 0;
-      if (value > 0) nonKitFound++; else notFound++;
+      value = s !== null ? s : "";
+      if (s !== null && s > 0) nonKitFound++; else notFound++;
     }
 
     afData.push({ range: `${D2C_TAB}!AF${row}`, values: [[value]] });

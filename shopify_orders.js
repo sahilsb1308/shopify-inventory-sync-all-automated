@@ -1308,29 +1308,12 @@ async function writeMotherWHStock(token) {
     if (JSON.parse(res.body).error) throw new Error(`AF write chunk ${i} failed: ${res.body}`);
   }
 
-  // 5. Clear old IMPORTRANGE helper cols AH–AK (no longer needed)
+  // 5. Clear old IMPORTRANGE helper cols AI–AK (no longer needed; AG/AH are now 7d columns)
   await withRetry(() => httpsRequest("POST",
     `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchClear`,
-    JSON.stringify({ ranges: [`${D2C_TAB}!AH1:AK2000`] }),
+    JSON.stringify({ ranges: [`${D2C_TAB}!AI1:AK2000`] }),
     { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
   ));
-
-  // 6. Trim sheet to exactly AF (col 32 = index 31); delete any extra columns beyond
-  const sheetMeta = JSON.parse((await withRetry(() => httpsGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}?fields=sheets(properties(sheetId,gridProperties))`,
-    { Authorization: `Bearer ${token}` }
-  ))).body);
-  const d2cSheet = (sheetMeta.sheets ?? []).find(s => s.properties.sheetId === D2C_TAB_GID);
-  const colCount = d2cSheet?.properties?.gridProperties?.columnCount ?? 0;
-  const TARGET_COLS = 32; // through AF (col 32, 1-indexed)
-  if (colCount > TARGET_COLS) {
-    await withRetry(() => httpsRequest("POST",
-      `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}:batchUpdate`,
-      JSON.stringify({ requests: [{ deleteDimension: { range: { sheetId: D2C_TAB_GID, dimension: "COLUMNS", startIndex: TARGET_COLS, endIndex: colCount } } }] }),
-      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-    ));
-    console.log(`  ✓ Trimmed ${colCount - TARGET_COLS} extra columns (now exactly AF)`);
-  }
 
   console.log(`  ✓ AF written: ${afData.length} rows — ${kitRows} kit rows (MIN child stock), ${nonKitFound} non-kit matched, ${notFound} not found in source`);
   console.log(`  ✓ Helper cols AH–AK cleared (direct API read replaces IMPORTRANGE)`);

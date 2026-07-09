@@ -1351,9 +1351,26 @@ async function write7dColumns(token, salesMap, skuTranslation) {
     if (sold7d > 0) written++;
   }
 
-  const lastRow = d2cSkus.length + 1; // +1 for header row offset (data starts at row 2)
+  const lastRow = d2cSkus.length + 1;
 
-  await withRetry(() => httpsRequest("POST",
+  // Expand sheet to at least 34 columns (AH) if needed — sheet is capped at AF (32) by default
+  const metaRes = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}?fields=sheets(properties(sheetId,gridProperties))`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  const d2cSheet = (JSON.parse(metaRes.body).sheets ?? []).find(s => s.properties.sheetId === D2C_TAB_GID);
+  const colCount = d2cSheet?.properties?.gridProperties?.columnCount ?? 0;
+  const NEEDED = 34; // through AH
+  if (colCount < NEEDED) {
+    await withRetry(() => httpsRequest("POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}:batchUpdate`,
+      JSON.stringify({ requests: [{ appendDimension: { sheetId: D2C_TAB_GID, dimension: "COLUMNS", length: NEEDED - colCount } }] }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    ));
+    console.log(`  Expanded sheet from ${colCount} to ${NEEDED} columns`);
+  }
+
+  const writeRes = await withRetry(() => httpsRequest("POST",
     `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
     JSON.stringify({ valueInputOption: "USER_ENTERED", data: [
       { range: `${D2C_TAB}!AG1`, values: [["Total Sold (7d)"]] },
@@ -1363,6 +1380,8 @@ async function write7dColumns(token, salesMap, skuTranslation) {
     ]}),
     { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
   ));
+  const writeResult = JSON.parse(writeRes.body);
+  if (writeResult.error) throw new Error(`AG/AH write failed: ${writeRes.body}`);
 
   console.log(`  ✓ AG/AH written — ${written} SKUs had 7d sales (window: ${D7_AGO_DATE} → today)`);
 }

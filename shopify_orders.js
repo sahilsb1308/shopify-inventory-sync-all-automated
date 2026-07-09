@@ -83,7 +83,8 @@ const STOCK_COL            = "G";   // Ending Inventory Units
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────
-const D30_AGO_ISO = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+const D30_AGO_ISO  = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+const D7_AGO_DATE  = new Date(Date.now() -  7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 // ─── Robust SKU matching ─────────────────────────────────────────────────────
 // Splits SKU into parts by dash/space/brackets and matches part-by-part.
@@ -1335,6 +1336,54 @@ async function writeMotherWHStock(token) {
   console.log(`  ✓ Helper cols AH–AK cleared (direct API read replaces IMPORTRANGE)`);
 }
 
+// ─── 7-day sold + DRR → D2C sheet cols AG / AH ───────────────────────────────
+// Uses dailyUnits already in salesMap (no extra Shopify API call).
+// Writes AG = Total Sold (7d), AH = DRR (7d) = AG / 7.
+async function write7dColumns(token, salesMap, skuTranslation) {
+  const d2cRes = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!B2:B2000`)}`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  const d2cSkus = (JSON.parse(d2cRes.body).values ?? []).map(r => (r[0] ?? "").trim());
+
+  const agValues = [];
+  const ahValues = [];
+  let written = 0;
+
+  for (const sku of d2cSkus) {
+    if (!sku) { agValues.push([""]); ahValues.push([""]); continue; }
+
+    const shopifySku = skuTranslation[sku] ?? sku;
+    const sales = salesMap[shopifySku] ?? salesMap[normalizeSKU(sku)];
+
+    let sold7d = 0;
+    if (sales?.dailyUnits) {
+      for (const [date, qty] of Object.entries(sales.dailyUnits)) {
+        if (date >= D7_AGO_DATE) sold7d += qty;
+      }
+    }
+    const drr7d = sold7d > 0 ? parseFloat((sold7d / 7).toFixed(4)) : 0;
+    agValues.push([sold7d]);
+    ahValues.push([drr7d]);
+    if (sold7d > 0) written++;
+  }
+
+  const lastRow = d2cSkus.length + 1; // +1 for header row offset (data starts at row 2)
+
+  await withRetry(() => httpsRequest("POST",
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
+    JSON.stringify({ valueInputOption: "USER_ENTERED", data: [
+      { range: `${D2C_TAB}!AG1`, values: [["Total Sold (7d)"]] },
+      { range: `${D2C_TAB}!AH1`, values: [["DRR (7d)"]] },
+      { range: `${D2C_TAB}!AG2:AG${lastRow}`, values: agValues },
+      { range: `${D2C_TAB}!AH2:AH${lastRow}`, values: ahValues },
+    ]}),
+    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  ));
+
+  console.log(`  ✓ AG/AH written — ${written} SKUs had 7d sales (window: ${D7_AGO_DATE} → today)`);
+}
+
 async function main() {
   console.log("═".repeat(58));
   console.log("  Shopify Reports → Google Sheets");
@@ -1414,11 +1463,15 @@ async function main() {
   await writeProjectedDemand(token, finalSkuRows, childToKits, kitParentSkus);
 
   // Step 9 — write Mother WH inventory to D2C sheet AF column
-  console.log("\n[9/9] Writing Mother WH inventory to D2C sheet (col AF)...");
+  console.log("\n[9/10] Writing Mother WH inventory to D2C sheet (col AF)...");
   await writeMotherWHStock(token);
 
+  // Step 10 — write 7-day sold + DRR to D2C sheet cols AG / AH
+  console.log("\n[10/10] Writing 7d sold + DRR to D2C sheet (cols AG/AH)...");
+  await write7dColumns(token, salesMap, skuTranslation);
+
   console.log("\n" + "═".repeat(58));
-  console.log("  Done. Cols G/K/L/N/U written from Shopify; M/R/T/V/W/X/Y/AB/AC/AD derived; NPD flags set; D2C AF = Mother WH stock.");
+  console.log("  Done. Cols G/K/L/N/U written from Shopify; M/R/T/V/W/X/Y/AB/AC/AD derived; NPD flags set; D2C AF = Mother WH stock; AG/AH = 7d sold/DRR.");
   console.log("═".repeat(58) + "\n");
 }
 

@@ -1200,16 +1200,16 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
 async function writeMotherWHStock(token) {
   const normSku = s => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
-  // 1. Read source sheet A:V (SKU in col A, stock in col V; data starts at MOTHER_WH_SRC_START)
+  // 1. Read source sheet A:W (SKU in col A, stock in col W = "Total Inventory"; data starts at row 6)
   const srcRes = await withRetry(() => httpsGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${MOTHER_WH_SRC_ID}/values/${encodeURIComponent(`${MOTHER_WH_SRC_TAB}!A${MOTHER_WH_SRC_START}:V`)}`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${MOTHER_WH_SRC_ID}/values/${encodeURIComponent(`${MOTHER_WH_SRC_TAB}!A6:W`)}`,
     { Authorization: `Bearer ${token}` }
   ));
   if (srcRes.statusCode !== 200) throw new Error(`Source sheet read failed: ${srcRes.statusCode}`);
   const srcRows = JSON.parse(srcRes.body).values ?? [];
 
-  // A=col 0, F=col 5, V=col 21 in the sliced range (A through V)
-  const SRC_SKU_IDX = 0, SRC_FSKU_IDX = 5, SRC_STK_IDX = 21;
+  // A=col 0, F=col 5, W=col 22 in the sliced range (A through W)
+  const SRC_SKU_IDX = 0, SRC_FSKU_IDX = 5, SRC_STK_IDX = 22;
 
   // Primary map: col A (variant SKU) → stock
   // Fallback map: col F (parent/product SKU) → stock (used when col A has no match)

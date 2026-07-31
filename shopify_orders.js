@@ -698,7 +698,7 @@ function calcOosDays(dailyUnits, threshold) {
 function calcDrr(netSold, oosDays) {
   const available = 30 - oosDays;
   if (available <= 0) return null;
-  return Math.round((netSold / available) * 10000) / 10000;
+  return Math.round((netSold / available) * 100) / 100;
 }
 
 function calcStockStatus(doi) {
@@ -1330,14 +1330,14 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
 
     // For child SKUs with kit DRR: update U, V, Z to reflect effective demand rate
     if (isChild && kitDrr > 0) {
-      colU[i] = [parseFloat(effectiveDrr.toFixed(4))];
+      colU[i] = [Math.round(effectiveDrr * 100) / 100];
       const effDoi = effectiveDrr > 0 ? parseFloat((gVal / effectiveDrr).toFixed(2)) : 0;
       colV[i] = [effDoi];
       colZ[i] = [calcStockStatus(effDoi)];
     }
 
-    const demand7d  = parseFloat((effectiveDrr *  7 * multiplier).toFixed(2));
-    const demand30d = parseFloat((effectiveDrr * 30 * multiplier).toFixed(2));
+    const demand7d  = Math.round(effectiveDrr *  7 * multiplier);
+    const demand30d = Math.round(effectiveDrr * 30 * multiplier);
     const asp       = kVal > 0 ? nVal / kVal : 0;
 
     colW[i]  = [demand7d];
@@ -1384,8 +1384,8 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
       const kVal2  = parseFloat((kVals[i]?.[0] ?? "0").replace(/,/g, "")) || 0;
       // Use the effective DRR already written to colU (includes kit contribution)
       const effDrr2  = parseFloat(colU[i]?.[0] ?? "0") || 0;
-      const demand7d2  = parseFloat((effDrr2 *  7 * newM).toFixed(2));
-      const demand30d2 = parseFloat((effDrr2 * 30 * newM).toFixed(2));
+      const demand7d2  = Math.round(effDrr2 *  7 * newM);
+      const demand30d2 = Math.round(effDrr2 * 30 * newM);
       const asp2       = kVal2 > 0 ? nVal2 / kVal2 : 0;
       colW[i]  = [demand7d2];
       colX[i]  = [demand30d2];
@@ -1579,7 +1579,7 @@ async function write7dColumns(token, salesMap, skuTranslation) {
         if (date >= D7_AGO_DATE) sold7d += qty;
       }
     }
-    const drr7d = sold7d > 0 ? parseFloat((sold7d / 7).toFixed(4)) : 0;
+    const drr7d = sold7d > 0 ? Math.round((sold7d / 7) * 100) / 100 : 0;
     agValues.push([sold7d]);
     ahValues.push([drr7d]);
     if (sold7d > 0) written++;

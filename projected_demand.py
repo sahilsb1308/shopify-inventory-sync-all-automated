@@ -95,7 +95,7 @@ def calc_drr(k_val: float, oos_days: float):
     available = 30 - oos_days
     if available <= 0:
         return None
-    return round(k_val / available, 4)
+    return round(k_val / available, 2)
 
 
 def calc_priority(npd_flag: str, promo_q: str, ab_val: float) -> str:
@@ -202,10 +202,10 @@ def main():
         oos_raw  = to_float(safe_col(row, COL_OOS), default=0) or 0
         drr_val  = calc_drr(k_raw, oos_raw)
         if drr_val is not None:
-            sku_to_drr[sku] = drr_val
+            sku_to_drr[sku] = round(drr_val, 2)
             pfx = sku_prefix(sku)
             if pfx not in prefix_to_drr:
-                prefix_to_drr[pfx] = drr_val
+                prefix_to_drr[pfx] = round(drr_val, 2)
 
     # ── Per-row calculations ──────────────────────────────────────────────────
     multiplier_results = []
@@ -309,7 +309,7 @@ def main():
 
         # Update DRR result in place for this child SKU when kit adds demand
         if is_child and kit_drr > 0:
-            drr_results[-1] = [round(effective_drr, 4)]
+            drr_results[-1] = [round(effective_drr, 2)]
 
         # V – Days of Inventory (uses effective DRR for child SKUs)
         if effective_drr > 0:
@@ -322,11 +322,11 @@ def main():
         stock_status_results.append([calc_stock_status(doi_val)])
 
         # W – Projected Demand 7d
-        demand_7d = round(effective_drr * 7 * multiplier, 2)
+        demand_7d = round(effective_drr * 7 * multiplier)
         demand_7d_results.append([demand_7d])
 
         # X – Projected Demand 30d
-        demand_30d = round(effective_drr * 30 * multiplier, 2)
+        demand_30d = round(effective_drr * 30 * multiplier)
         demand_results.append([demand_30d])
 
         # Y – Projected Revenue 30d  (ASP = N/K)

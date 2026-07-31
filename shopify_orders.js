@@ -80,6 +80,7 @@ const REV_CONTRIB_COL      = "AB";  // Revenue Contribution %
 const FILL_RATE_COL        = "AC";  // Fill Rate = (K + G) / S
 const UNITS_TO_FILL_COL    = "AD";  // Units to be Filled = MAX(0, X − G)
 const STOCK_COL            = "G";   // Ending Inventory Units
+const NPD_START_DATE_COL   = "AF";  // NPD Start Date — stamped when AE first becomes 1; cleared on expiry
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────
@@ -906,6 +907,95 @@ async function markNpdFlags(token, skuRows, npdSkus) {
   console.log(`  ✓ NPD flags synced — ${setTo1} set to 1, ${setTo0} cleared to blank`);
 }
 
+// ─── NPD Start Date tracking + 3-month expiry ────────────────────────────────
+// Col AF (NPD_START_DATE_COL) in main sheet tracks when AE was first set to 1.
+// On expiry (3+ months): clears AE in main sheet + clears the SKU cell from the
+// NPD allocation sheet so the next markNpdFlags run won't re-flag it.
+async function syncNpdExpiry(token, skuRows) {
+  const TODAY   = new Date().toISOString().slice(0, 10);
+  const lastRow = skuRows[skuRows.length - 1].row;
+
+  // Read AE (NPD flag) and AF (NPD Start Date) from main sheet
+  const batchRes = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet` +
+    `?ranges=${encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`)}` +
+    `&ranges=${encodeURIComponent(`${SHEET_TAB}!${NPD_START_DATE_COL}${DATA_START_ROW}:${NPD_START_DATE_COL}${lastRow}`)}`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  if (batchRes.statusCode !== 200) throw new Error(`NPD expiry read failed: ${batchRes.statusCode}`);
+  const [aeVals, afVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
+
+  const mainUpdates = [];  // writes back to main sheet (AF stamps + AE clears)
+  const expiredSkus = new Set();  // npdPrefix values to remove from allocation sheet
+
+  for (const { sku, row } of skuRows) {
+    const i  = row - DATA_START_ROW;
+    const ae = parseFloat((aeVals[i]?.[0] ?? "").toString().trim()) || 0;
+    const af = (afVals[i]?.[0] ?? "").trim();
+
+    if (ae !== 1) continue;
+
+    if (!af) {
+      // First time flagged as NPD — stamp today
+      mainUpdates.push({ range: `${SHEET_TAB}!${NPD_START_DATE_COL}${row}`, values: [[TODAY]] });
+    } else {
+      const added = new Date(af);
+      if (!isNaN(added)) {
+        const threshold = new Date(added);
+        threshold.setMonth(threshold.getMonth() + 3);
+        if (new Date() >= threshold) {
+          expiredSkus.add(npdPrefix(sku));
+          // Clear AE and AF so if user re-adds to NPD sheet the clock resets
+          mainUpdates.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`,       values: [[""]] });
+          mainUpdates.push({ range: `${SHEET_TAB}!${NPD_START_DATE_COL}${row}`, values: [[""]] });
+        }
+      }
+    }
+  }
+
+  if (mainUpdates.length > 0) {
+    const wr = await withRetry(() => httpsRequest(
+      "POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
+      JSON.stringify({ valueInputOption: "USER_ENTERED", data: mainUpdates }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    ));
+    if (wr.statusCode !== 200) throw new Error(`NPD expiry main write failed: ${wr.body}`);
+  }
+
+  // Remove expired SKU cells from the NPD allocation sheet tabs
+  if (expiredSkus.size > 0) {
+    const clearRanges = [];
+    for (const { name, skuCol } of NPD_TABS) {
+      const res = await withRetry(() => httpsGet(
+        `https://sheets.googleapis.com/v4/spreadsheets/${NPD_SHEET_ID}/values/${encodeURIComponent(`${name}!${skuCol}:${skuCol}`)}`,
+        { Authorization: `Bearer ${token}` }
+      ));
+      if (res.statusCode !== 200) { console.warn(`  ⚠ Could not read NPD tab "${name}" — skipping`); continue; }
+      const values = JSON.parse(res.body).values ?? [];
+      values.forEach(([cell], rowIdx) => {
+        if (!cell?.trim()) return;
+        if (expiredSkus.has(npdPrefix(cell))) {
+          clearRanges.push(`${name}!${skuCol}${rowIdx + 1}`);
+        }
+      });
+    }
+    if (clearRanges.length > 0) {
+      const cr = await withRetry(() => httpsRequest(
+        "POST",
+        `https://sheets.googleapis.com/v4/spreadsheets/${NPD_SHEET_ID}/values:batchClear`,
+        JSON.stringify({ ranges: clearRanges }),
+        { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+      ));
+      if (cr.statusCode !== 200) throw new Error(`NPD allocation clear failed: ${cr.body}`);
+      console.log(`  ✓ Cleared ${clearRanges.length} cell(s) from allocation sheet: ${[...expiredSkus].join(", ")}`);
+    }
+  }
+
+  const stamped = mainUpdates.filter(u => u.values[0][0] === TODAY).length;
+  console.log(`  ✓ ${stamped} NPD Start Date(s) stamped, ${expiredSkus.size} expired and removed`);
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Projected Demand  (Column X)
 // Mirrors exactly:
@@ -1454,7 +1544,7 @@ async function main() {
   await writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation);
 
   // Step 6 — append new rows for SKUs sold in last 3 days but not yet in sheet
-  console.log("\n[6/11] Checking for new products sold in last 30 days...");
+  console.log("\n[6/10] Checking for new products sold in last 30 days...");
   const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation);
   console.log(`  ${newSkus.length === 0 ? "✓ No new unmatched products found." : `⚡ ${newSkus.length} new SKU(s) to append`}`);
   // Re-read the sheet to get the true last row right before appending —
@@ -1466,15 +1556,17 @@ async function main() {
   console.log(`  New rows will start at      : ${lastRow + 1}`);
   if (!DRY_RUN) await appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap, lastRow);
 
-  // Step 7 — read NPD allocation sheet and mark column AE = 1 for matching SKUs
-  console.log("\n[7/11] Syncing NPD flags from allocation sheet...");
+  // Step 7 — read NPD allocation sheet, mark AE flags, then expire 3mo-old entries
+  console.log("\n[7/10] Syncing NPD flags from allocation sheet...");
   const npdSkus = await fetchNpdSkus(token);
   console.log(`  Total NPD SKUs across all tabs: ${npdSkus.size}`);
   const latestSkuRows = await readSheetSKUs(token);
   await markNpdFlags(token, latestSkuRows, npdSkus);
+  console.log("  Checking NPD expiry (3-month auto-removal)...");
+  await syncNpdExpiry(token, latestSkuRows);
 
   // Step 8 — calculate and write projected demand (col X)
-  console.log("\n[8/11] Writing projected demand (col X)...");
+  console.log("\n[8/10] Writing projected demand (col X)...");
   const { childToKits, kitParentSkus } = await readKitsSheet(token);
   console.log(`  Kits sheet: ${kitParentSkus.size} kit parent SKUs, ${Object.keys(childToKits).length} child SKUs`);
   if (kitParentSkus.size > 0) console.log(`  Sample kit parents: ${[...kitParentSkus].slice(0, 5).join(", ")}`);

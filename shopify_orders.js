@@ -908,14 +908,36 @@ async function markNpdFlags(token, skuRows, npdSkus) {
 }
 
 // ─── NPD Start Date tracking + 3-month expiry ────────────────────────────────
-// Col AF (NPD_START_DATE_COL) in main sheet tracks when AE was first set to 1.
+// Col AI (NPD_START_DATE_COL) in main sheet tracks when AE was first set to 1.
 // On expiry (3+ months): clears AE in main sheet + clears the SKU cell from the
 // NPD allocation sheet so the next markNpdFlags run won't re-flag it.
 async function syncNpdExpiry(token, skuRows) {
+  if (!skuRows.length) return;
   const TODAY   = new Date().toISOString().slice(0, 10);
   const lastRow = skuRows[skuRows.length - 1].row;
 
-  // Read AE (NPD flag) and AF (NPD Start Date) from main sheet
+  // Ensure col AI (column 35) exists in the main sheet — expand if needed
+  const metaRes = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}?fields=sheets(properties(sheetId,title,gridProperties))`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  if (metaRes.statusCode === 200) {
+    const sheets    = JSON.parse(metaRes.body).sheets ?? [];
+    const mainSheet = sheets.find(s => s.properties.title === SHEET_TAB);
+    const colCount  = mainSheet?.properties?.gridProperties?.columnCount ?? 0;
+    const NEED      = 35; // AI = column 35 (1-based)
+    if (colCount < NEED) {
+      await withRetry(() => httpsRequest(
+        "POST",
+        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
+        JSON.stringify({ requests: [{ appendDimension: { sheetId: mainSheet.properties.sheetId, dimension: "COLUMNS", length: NEED - colCount } }] }),
+        { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+      ));
+      console.log(`  Expanded main sheet to ${NEED} columns for NPD Start Date col`);
+    }
+  }
+
+  // Read AE (NPD flag) and AI (NPD Start Date) from main sheet
   const batchRes = await withRetry(() => httpsGet(
     `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet` +
     `?ranges=${encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`)}` +

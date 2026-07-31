@@ -121,12 +121,17 @@ def calc_stock_status(doi) -> str:
 
 
 def calc_multiplier(npd_flag: str, npd_text: str, promo_q: str, is_bestseller: int, priority: str) -> float:
+    is_npd   = to_float(npd_flag) == 1
+    is_focus = to_float(promo_q)  == 1
+    # NPD + Focus → 5x; NPD alone → 3x
+    if is_npd and is_focus: return 5.0
+    if is_npd:              return 3.0
+    # Otherwise take MAX of remaining signals
     priority_scores = {"P0": 1.5, "P1": 1.3, "P2": 1.2, "P3": 1.1}
     candidates = [
-        6   if to_float(npd_flag) == 1          else 0,
-        1.8 if npd_text.upper() == "NPD"         else 0,
-        1.5 if to_float(promo_q) == 1            else 0,
-        1.2 if is_bestseller == 1                else 0,
+        1.8 if npd_text.upper() == "NPD" else 0,
+        1.5 if is_focus                   else 0,
+        1.2 if is_bestseller == 1         else 0,
         priority_scores.get(priority.upper(), 1),
     ]
     return max(candidates)

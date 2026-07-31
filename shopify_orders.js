@@ -923,12 +923,16 @@ function skuPrefix(sku) {
 }
 
 function demandMultiplier(priority, npd, npdFlag, promoQ, promoR) {
+  const isNpd   = Number(npdFlag) === 1;
+  const isFocus = Number(promoQ)  === 1;
+  // NPD + Focus → 5x; NPD alone → 3x
+  if (isNpd && isFocus) return 5;
+  if (isNpd)            return 3;
+  // Otherwise take MAX of remaining signals
   const candidates = [];
-  if (Number(npdFlag) === 1) candidates.push(6);                          // col AE = 1 → NPD flag
   if ((npd ?? "").trim().toUpperCase() === "NPD") candidates.push(1.8);  // col O = "NPD" text
-  if (Number(promoQ) === 1) candidates.push(1.5);
-  if (Number(promoR) === 1) candidates.push(1.2);
-  // Priority — default 1 when none of P0/P1/P2/P3 match (mirrors formula's final IF(...,1))
+  if (isFocus)                                    candidates.push(1.5);
+  if (Number(promoR) === 1)                       candidates.push(1.2);
   const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
   candidates.push(pMap[(priority ?? "").trim().toUpperCase()] ?? 1);
   return Math.max(...candidates);

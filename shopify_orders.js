@@ -50,6 +50,10 @@ const MOTHER_WH_SRC_TAB    = "Inventory Dashboard";
 const MOTHER_WH_SRC_START  = 5;   // source data starts at row 5
 const MOTHER_WH_COL        = "AF";
 
+// ─── Focus Allocation sheet (separate spreadsheet) ───────────────────────────
+const FOCUS_SHEET_ID = "1OAJblwHn0Twxgzfr-MoncAmC1ED-KtN1fzchR53a7AI";
+const FOCUS_FLAG_COL = "Q";  // Column in Inventory Dashboard to mark Focus = 1
+
 // ─── NPD Allocation sheet (separate spreadsheet) ─────────────────────────────
 const NPD_SHEET_ID  = "1Ubwo5ElTn4AH1zIWqZUOsjhvo-SZ_t_i2dZkCLOaKHw";
 const NPD_TABS      = [
@@ -907,6 +911,94 @@ async function markNpdFlags(token, skuRows, npdSkus) {
   console.log(`  ✓ NPD flags synced — ${setTo1} set to 1, ${setTo0} cleared to blank`);
 }
 
+// ─── Focus Allocation sheet sync ─────────────────────────────────────────────
+
+/**
+ * Extracts the SKU token from a focus-sheet cell like "SB-343 Glaze days (Key Focus) P0".
+ * Returns null for section headers (e.g. "SWISS BEAUTY") or blank/campaign rows.
+ */
+function focusSkuFromCell(cell) {
+  const token = (cell || "").trim().split(/\s+/)[0];
+  return /^[A-Z][A-Z0-9]*-[A-Z0-9]/i.test(token) ? token : null;
+}
+
+/**
+ * Reads product SKUs from the focus allocation sheet (Sheet1!A:A) and returns a
+ * Set of normalised SKU prefixes (up to second hyphen) that are marked as focus.
+ */
+async function fetchFocusSkus(token) {
+  const range = encodeURIComponent("Sheet1!A:A");
+  const res   = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${FOCUS_SHEET_ID}/values/${range}`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  if (res.statusCode !== 200) {
+    console.warn(`  ⚠ Could not read focus sheet (${res.statusCode}) — skipping focus sync`);
+    return new Set();
+  }
+  const values    = JSON.parse(res.body).values ?? [];
+  const focusSkus = new Set();
+  for (const [cell = ""] of values) {
+    const sku = focusSkuFromCell(cell);
+    if (sku) focusSkus.add(npdPrefix(sku));
+  }
+  console.log(`  Focus sheet: ${focusSkus.size} focus SKU prefixes`);
+  return focusSkus;
+}
+
+/**
+ * Two-way sync of focus flags (col Q = 1) into both the main sheet and the
+ * D2C sheet so that shopify_orders.js and projected_demand.py both see the flags.
+ * - SKU prefix in focusSkus but Q != 1  → set Q = 1
+ * - SKU prefix not in focusSkus but Q=1 → clear Q to ""
+ */
+async function markFocusFlags(token, focusSkus) {
+  if (focusSkus.size === 0) { console.log("  No focus SKUs found — nothing to mark."); return; }
+
+  async function syncSheet(sheetId, tabName, label) {
+    const skuUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(`${tabName}!B${DATA_START_ROW}:B`)}`;
+    const qUrl   = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(`${tabName}!${FOCUS_FLAG_COL}${DATA_START_ROW}:${FOCUS_FLAG_COL}`)}`;
+    const [skuRes, qRes] = await Promise.all([
+      withRetry(() => httpsGet(skuUrl, { Authorization: `Bearer ${token}` })),
+      withRetry(() => httpsGet(qUrl,   { Authorization: `Bearer ${token}` })),
+    ]);
+    if (skuRes.statusCode !== 200) {
+      console.warn(`  ⚠ Could not read SKUs from ${label} (${skuRes.statusCode}) — skipping`);
+      return;
+    }
+    const skuVals = JSON.parse(skuRes.body).values ?? [];
+    const qVals   = qRes.statusCode === 200 ? (JSON.parse(qRes.body).values ?? []) : [];
+    const writes  = [];
+    let set1 = 0, cleared = 0;
+    for (let i = 0; i < skuVals.length; i++) {
+      const sku     = normalizeSKU((skuVals[i]?.[0] ?? "").trim());
+      if (!sku) continue;
+      const isFocus = focusSkus.has(npdPrefix(sku));
+      const current = parseFloat((qVals[i]?.[0] ?? "").toString().trim()) || 0;
+      const row     = DATA_START_ROW + i;
+      if (isFocus && current !== 1) {
+        writes.push({ range: `${tabName}!${FOCUS_FLAG_COL}${row}`, values: [[1]] });
+        set1++;
+      } else if (!isFocus && current === 1) {
+        writes.push({ range: `${tabName}!${FOCUS_FLAG_COL}${row}`, values: [[""]] });
+        cleared++;
+      }
+    }
+    console.log(`  ${label}: ${set1} set to 1, ${cleared} cleared`);
+    if (writes.length === 0) return;
+    const res = await withRetry(() => httpsRequest(
+      "POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values:batchUpdate`,
+      JSON.stringify({ valueInputOption: "USER_ENTERED", data: writes }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    ));
+    if (res.statusCode !== 200) throw new Error(`Focus flag write error (${label}) ${res.statusCode}: ${res.body.replace(/\s+/g, " ")}`);
+  }
+
+  await syncSheet(D2C_SHEET_ID, D2C_TAB, "D2C sheet");
+  console.log(`  ✓ Focus flags synced`);
+}
+
 // ─── NPD Start Date tracking + 3-month expiry ────────────────────────────────
 // Col AI (NPD_START_DATE_COL) in main sheet tracks when AE was first set to 1.
 // On expiry (3+ months): clears AE in main sheet + clears the SKU cell from the
@@ -1600,6 +1692,11 @@ async function main() {
   console.log("  Checking NPD expiry (3-month auto-removal)...");
   await syncNpdExpiry(token, latestSkuRows);
 
+  // Step 7b — sync focus flags from focus allocation sheet
+  console.log("\n[7b] Syncing focus flags from allocation sheet...");
+  const focusSkus = await fetchFocusSkus(token);
+  await markFocusFlags(token, focusSkus);
+
   // Step 8 — calculate and write projected demand (col X)
   console.log("\n[8/10] Writing projected demand (col X)...");
   const { childToKits, kitParentSkus } = await readKitsSheet(token);
@@ -1617,7 +1714,7 @@ async function main() {
   await write7dColumns(token, salesMap, skuTranslation);
 
   console.log("\n" + "═".repeat(58));
-  console.log("  Done. Cols G/K/L/N/U written from Shopify; M/R/T/U/V/W/X/Y/AB/AC/AD derived; NPD flags set; D2C AF = Mother WH stock; AG/AH = 7d sold/DRR.");
+  console.log("  Done. Cols G/K/L/N/U written from Shopify; M/R/T/U/V/W/X/Y/AB/AC/AD derived; NPD flags (AE) + focus flags (Q) synced; D2C AF = Mother WH stock; AG/AH = 7d sold/DRR.");
   console.log("═".repeat(58) + "\n");
 }
 

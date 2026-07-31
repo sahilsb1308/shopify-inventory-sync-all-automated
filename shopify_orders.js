@@ -80,7 +80,7 @@ const REV_CONTRIB_COL      = "AB";  // Revenue Contribution %
 const FILL_RATE_COL        = "AC";  // Fill Rate = (K + G) / S
 const UNITS_TO_FILL_COL    = "AD";  // Units to be Filled = MAX(0, X − G)
 const STOCK_COL            = "G";   // Ending Inventory Units
-const NPD_START_DATE_COL   = "AF";  // NPD Start Date — stamped when AE first becomes 1; cleared on expiry
+const NPD_START_DATE_COL   = "AI";  // NPD Start Date — stamped when AE first becomes 1; cleared on expiry
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────

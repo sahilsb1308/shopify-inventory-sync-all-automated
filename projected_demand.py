@@ -193,6 +193,22 @@ def main():
             n_nonblank.append(n_val)
     n_median = statistics.median(n_nonblank) if n_nonblank else 0
 
+    # ── Pre-pass: raw DRR for all SKUs (needed for kit DRR contribution) ──────
+    sku_to_drr:    dict[str, float] = {}
+    prefix_to_drr: dict[str, float] = {}
+    for row in dash_rows[1:]:
+        sku = normalize_sku(safe_col(row, COL_SKU))
+        if not sku:
+            continue
+        k_raw    = to_float(safe_col(row, COL_K),   default=0) or 0
+        oos_raw  = to_float(safe_col(row, COL_OOS), default=0) or 0
+        drr_val  = calc_drr(k_raw, oos_raw)
+        if drr_val is not None:
+            sku_to_drr[sku] = drr_val
+            pfx = sku_prefix(sku)
+            if pfx not in prefix_to_drr:
+                prefix_to_drr[pfx] = drr_val
+
     # ── Per-row calculations ──────────────────────────────────────────────────
     multiplier_results = []
     bestseller_results = []
@@ -285,9 +301,22 @@ def main():
             units_fill_results.append([0])
             continue
 
-        # V – Days of Inventory
-        if drr and drr > 0:
-            doi_val = round(g_val / drr, 2)
+        # Kit DRR contribution: sum the raw DRR of each parent kit so that
+        # effective_drr * days * multiplier gives the correct projected demand.
+        kit_drr = sum(
+            sku_to_drr.get(kit_sku, prefix_to_drr.get(sku_prefix(kit_sku), 0))
+            for kit_sku in child_to_kits.get(norm_sku, [])
+        )
+        base_drr      = drr or 0
+        effective_drr = base_drr + kit_drr
+
+        # Update DRR result in place for this child SKU when kit adds demand
+        if is_child and kit_drr > 0:
+            drr_results[-1] = [round(effective_drr, 4)]
+
+        # V – Days of Inventory (uses effective DRR for child SKUs)
+        if effective_drr > 0:
+            doi_val = round(g_val / effective_drr, 2)
         else:
             doi_val = 0
         doi_results.append([doi_val])
@@ -295,20 +324,12 @@ def main():
         # Z – Stock Status
         stock_status_results.append([calc_stock_status(doi_val)])
 
-        # Kit contribution (uses K from sheet)
-        kit_contrib = sum(
-            prefix_to_k.get(sku_prefix(kit_sku), 0)
-            for kit_sku in child_to_kits.get(norm_sku, [])
-        )
-
-        base_drr = drr or 0
-
         # W – Projected Demand 7d
-        demand_7d = round((base_drr * 7 + kit_contrib) * multiplier, 2)
+        demand_7d = round(effective_drr * 7 * multiplier, 2)
         demand_7d_results.append([demand_7d])
 
         # X – Projected Demand 30d
-        demand_30d = round((base_drr * 30 + kit_contrib) * multiplier, 2)
+        demand_30d = round(effective_drr * 30 * multiplier, 2)
         demand_results.append([demand_30d])
 
         # Y – Projected Revenue 30d  (ASP = N/K)

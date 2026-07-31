@@ -992,15 +992,21 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
   const [oVals, qVals, uVals, kVals, aeVals, nVals, gVals, iVals, jVals, sVals] =
     (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
 
-  // Build SKU → K and prefix → K lookups for kit contribution
+  // Build SKU → K/DRR and prefix → K/DRR lookups for kit DRR contribution
   const skuToK    = {};
   const prefixToK = {};
+  const skuToDrr    = {};
+  const prefixToDrr = {};
   for (const { sku, row } of skuRows) {
     const i = row - DATA_START_ROW;
     const k = parseFloat((kVals[i]?.[0] ?? "0").replace(/,/g, "")) || 0;
     skuToK[sku] = k;
     const prefix = skuPrefix(sku);
     if (!(prefix in prefixToK)) prefixToK[prefix] = k;
+    const drrRaw = (uVals[i]?.[0] ?? "").trim();
+    const drrVal = drrRaw === "" ? 0 : (parseFloat(drrRaw) || 0);
+    skuToDrr[sku] = drrVal;
+    if (!(prefix in prefixToDrr)) prefixToDrr[prefix] = drrVal;
   }
 
   // Pre-compute total N and median N for bestseller + revenue contribution
@@ -1014,6 +1020,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
   const colM  = Array.from({ length: totalRows }, () => [0]);
   const colR  = Array.from({ length: totalRows }, () => [0]);
   const colT  = Array.from({ length: totalRows }, () => [0]);
+  const colU  = Array.from({ length: totalRows }, (_, i) => [uVals[i]?.[0] ?? ""]);  // initialized from sheet; child SKUs get effective DRR
   const colV  = Array.from({ length: totalRows }, () => [0]);
   const colW  = Array.from({ length: totalRows }, () => [""]);
   const colX  = Array.from({ length: totalRows }, () => [""]);
@@ -1101,13 +1108,24 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
       continue;
     }
 
-    const kitContrib = (childToKits[sku] ?? []).reduce((sum, kitSku) => {
-      return sum + (skuToK[kitSku] ?? prefixToK[skuPrefix(kitSku)] ?? 0);
+    // Kit DRR contribution: add the raw DRR of each parent kit so that
+    // effectiveDrr * days * multiplier gives the correct projected demand.
+    const kitDrr = (childToKits[sku] ?? []).reduce((sum, kitSku) => {
+      return sum + (skuToDrr[kitSku] ?? prefixToDrr[skuPrefix(kitSku)] ?? 0);
     }, 0);
-    const multiplier = mScore;
+    const effectiveDrr = (drr ?? 0) + kitDrr;
+    const multiplier   = mScore;
 
-    const demand7d  = parseFloat((((drr ?? 0) *  7 + kitContrib * 7 / 30) * multiplier).toFixed(2));
-    const demand30d = parseFloat((((drr ?? 0) * 30 + kitContrib          ) * multiplier).toFixed(2));
+    // For child SKUs with kit DRR: update U, V, Z to reflect effective demand rate
+    if (isChild && kitDrr > 0) {
+      colU[i] = [parseFloat(effectiveDrr.toFixed(4))];
+      const effDoi = effectiveDrr > 0 ? parseFloat((gVal / effectiveDrr).toFixed(2)) : 0;
+      colV[i] = [effDoi];
+      colZ[i] = [calcStockStatus(effDoi)];
+    }
+
+    const demand7d  = parseFloat((effectiveDrr *  7 * multiplier).toFixed(2));
+    const demand30d = parseFloat((effectiveDrr * 30 * multiplier).toFixed(2));
     const asp       = kVal > 0 ? nVal / kVal : 0;
 
     colW[i]  = [demand7d];
@@ -1149,16 +1167,14 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
       );
       colM[i] = [newM];
 
-      // Recalculate demand columns with the new multiplier
-      const drrRaw2   = (uVals[i]?.[0] ?? "").trim();
-      const drr2      = drrRaw2 === "" ? null : (parseFloat(drrRaw2) || 0);
-      const gVal2     = parseFloat((gVals[i]?.[0] ?? "0")) || 0;
-      const nVal2     = parseFloat((nVals[i]?.[0] ?? "0")) || 0;
-      const kVal2     = parseFloat((kVals[i]?.[0] ?? "0").replace(/,/g, "")) || 0;
-      const kitContrib2 = (childToKits[sku] ?? []).reduce((sum, kitSku) =>
-        sum + (skuToK[kitSku] ?? prefixToK[skuPrefix(kitSku)] ?? 0), 0);
-      const demand7d2  = parseFloat((((drr2 ?? 0) *  7 + kitContrib2 * 7 / 30) * newM).toFixed(2));
-      const demand30d2 = parseFloat((((drr2 ?? 0) * 30 + kitContrib2          ) * newM).toFixed(2));
+      // Recalculate demand columns with the new multiplier using effective DRR
+      const gVal2  = parseFloat((gVals[i]?.[0] ?? "0")) || 0;
+      const nVal2  = parseFloat((nVals[i]?.[0] ?? "0")) || 0;
+      const kVal2  = parseFloat((kVals[i]?.[0] ?? "0").replace(/,/g, "")) || 0;
+      // Use the effective DRR already written to colU (includes kit contribution)
+      const effDrr2  = parseFloat(colU[i]?.[0] ?? "0") || 0;
+      const demand7d2  = parseFloat((effDrr2 *  7 * newM).toFixed(2));
+      const demand30d2 = parseFloat((effDrr2 * 30 * newM).toFixed(2));
       const asp2       = kVal2 > 0 ? nVal2 / kVal2 : 0;
       colW[i]  = [demand7d2];
       colX[i]  = [demand30d2];
@@ -1177,6 +1193,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
         { range: make(MULTIPLIER_COL),    values: colM  },
         { range: make(BESTSELLER_COL),    values: colR  },
         { range: make(TOTAL_STOCK_COL),   values: colT  },
+        { range: make(DRR_COL),           values: colU  },  // effective DRR for child SKUs
         { range: make(DOI_COL),           values: colV  },
         { range: make(DEMAND_7D_COL),     values: colW  },
         { range: make(DEMAND_COL),        values: colX  },
@@ -1191,7 +1208,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     )
   );
   if (res.statusCode !== 200) throw new Error(`Derived cols write error ${res.statusCode}: ${res.body}`);
-  console.log(`  ✓ Cols M/R/T/V/W/X/Y/Z/AA/AB/AC/AD written for ${skuRows.length} rows`);
+  console.log(`  ✓ Cols M/R/T/U/V/W/X/Y/Z/AA/AB/AC/AD written for ${skuRows.length} rows (U = effective DRR for kit children)`);
 }
 
 // ─── Date Added + NPD→EPD auto-transition ────────────────────────────────────

@@ -80,7 +80,6 @@ const REV_CONTRIB_COL      = "AB";  // Revenue Contribution %
 const FILL_RATE_COL        = "AC";  // Fill Rate = (K + G) / S
 const UNITS_TO_FILL_COL    = "AD";  // Units to be Filled = MAX(0, X − G)
 const STOCK_COL            = "G";   // Ending Inventory Units
-const DATE_ADDED_COL       = "AF";  // Date Added — set when product first appears as NPD/EPD
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────
@@ -923,7 +922,7 @@ function skuPrefix(sku) {
   return parts.length >= 2 ? `${parts[0]}-${parts[1]}` : sku;
 }
 
-function demandMultiplier(priority, npd, npdFlag, promoQ, promoR) {
+function demandMultiplier(priority, npdFlag, promoQ, promoR) {
   const isNpd   = Number(npdFlag) === 1;
   const isFocus = Number(promoQ)  === 1;
   // NPD + Focus → 5x; NPD alone → 3x
@@ -931,9 +930,8 @@ function demandMultiplier(priority, npd, npdFlag, promoQ, promoR) {
   if (isNpd)            return 3;
   // Otherwise take MAX of remaining signals
   const candidates = [];
-  if ((npd ?? "").trim().toUpperCase() === "NPD") candidates.push(1.8);  // col O = "NPD" text
-  if (isFocus)                                    candidates.push(1.5);
-  if (Number(promoR) === 1)                       candidates.push(1.2);
+  if (isFocus)              candidates.push(1.5);
+  if (Number(promoR) === 1) candidates.push(1.2);
   const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
   candidates.push(pMap[(priority ?? "").trim().toUpperCase()] ?? 1);
   return Math.max(...candidates);
@@ -974,7 +972,6 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
 
   // Batch-read all columns needed for derived calculations
   const ranges = [
-    `${SHEET_TAB}!O${DATA_START_ROW}:O${lastRow}`,   // NPD text
     `${SHEET_TAB}!Q${DATA_START_ROW}:Q${lastRow}`,   // Promo Q
     `${SHEET_TAB}!U${DATA_START_ROW}:U${lastRow}`,   // DRR (just written)
     `${SHEET_TAB}!K${DATA_START_ROW}:K${lastRow}`,   // Net Sold (just written)
@@ -989,7 +986,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
   const batchRes = await withRetry(() => httpsGet(batchUrl, { Authorization: `Bearer ${token}` }));
   if (batchRes.statusCode !== 200) throw new Error(`Demand cols read error ${batchRes.statusCode}: ${batchRes.body}`);
 
-  const [oVals, qVals, uVals, kVals, aeVals, nVals, gVals, iVals, jVals, sVals] =
+  const [qVals, uVals, kVals, aeVals, nVals, gVals, iVals, jVals, sVals] =
     (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
 
   // Build SKU → K/DRR and prefix → K/DRR lookups for kit DRR contribution
@@ -1030,13 +1027,12 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
   const colAB = Array.from({ length: totalRows }, () => [0]);
   const colAC = Array.from({ length: totalRows }, () => [0]);
   const colAD = Array.from({ length: totalRows }, () => [""]);
-  const rowState = new Map(); // i → {npdFlag, npd, promoQ, isBestseller} for second pass
+  const rowState = new Map(); // i → {npdFlag, promoQ, isBestseller} for second pass
 
   for (const { sku, row, priority } of skuRows) {
     const i       = row - DATA_START_ROW;
     const drrRaw  = (uVals[i]?.[0] ?? "").trim();
     const drr     = drrRaw === "" ? null : (parseFloat(drrRaw) || 0);
-    const npd     = (oVals[i]?.[0] ?? "").trim();
     const npdFlag = (aeVals[i]?.[0] ?? "").trim();
     const promoQ  = (qVals[i]?.[0] ?? "").trim();
     const nRaw    = (nVals[i]?.[0] ?? "").trim();
@@ -1053,7 +1049,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     // Col R — Bestseller: 1 if N ≥ median of all non-blank N values
     const isBestseller = nRaw !== "" && nVal >= nMedian ? 1 : 0;
     colR[i] = [isBestseller];
-    rowState.set(i, { npdFlag, npd, promoQ, isBestseller });
+    rowState.set(i, { npdFlag, promoQ, isBestseller });
 
     // Col T — Total Available Stock = G + I + J (0 if any blank)
     if (gRaw === "" || iRaw === "" || jRaw === "") {
@@ -1079,10 +1075,9 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     // Col M — Revenue Multiplier (uses computedPriority, not stale sheet AA)
     const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
     const mScore = Math.max(
-      Number(npdFlag) === 1           ? 6   : 0,
-      npd.toUpperCase() === "NPD"     ? 1.8 : 0,
-      Number(promoQ) === 1            ? 1.5 : 0,
-      isBestseller === 1              ? 1.2 : 0,
+      Number(npdFlag) === 1 ? (Number(promoQ) === 1 ? 5 : 3) : 0,
+      Number(promoQ) === 1  ? 1.5 : 0,
+      isBestseller === 1    ? 1.2 : 0,
       pMap[computedPriority] ?? 1,
     );
     colM[i] = [mScore];
@@ -1157,12 +1152,11 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
       colAA[i] = ["P0"];
       promoted++;
 
-      const { npdFlag, npd, promoQ, isBestseller } = rowState.get(i) ?? {};
+      const { npdFlag, promoQ, isBestseller } = rowState.get(i) ?? {};
       const newM = Math.max(
-        Number(npdFlag) === 1               ? 6   : 0,
-        (npd ?? "").toUpperCase() === "NPD" ? 1.8 : 0,
-        Number(promoQ) === 1                ? 1.5 : 0,
-        isBestseller === 1                  ? 1.2 : 0,
+        Number(npdFlag) === 1 ? (Number(promoQ) === 1 ? 5 : 3) : 0,
+        Number(promoQ) === 1  ? 1.5 : 0,
+        isBestseller === 1    ? 1.2 : 0,
         pMap["P0"],
       );
       colM[i] = [newM];
@@ -1211,70 +1205,6 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
   console.log(`  ✓ Cols M/R/T/U/V/W/X/Y/Z/AA/AB/AC/AD written for ${skuRows.length} rows (U = effective DRR for kit children)`);
 }
 
-// ─── Date Added + NPD→EPD auto-transition ────────────────────────────────────
-// For every row in the main sheet where col O = "NPD" or "EPD":
-//   • If col AF (Date Added) is blank → write today's date (first time seen)
-//   • If col O = "NPD" and Date Added is 3+ months ago → change col O to "EPD"
-// Date Added is never overwritten once set.
-async function syncNpdEpdDates(token) {
-  const TODAY = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-
-  const rangeO  = `${SHEET_TAB}!O${DATA_START_ROW}:O5000`;
-  const rangeAF = `${SHEET_TAB}!${DATE_ADDED_COL}${DATA_START_ROW}:${DATE_ADDED_COL}5000`;
-
-  const res = await withRetry(() => httpsGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet` +
-    `?ranges=${encodeURIComponent(rangeO)}&ranges=${encodeURIComponent(rangeAF)}`,
-    { Authorization: `Bearer ${token}` }
-  ));
-  if (res.statusCode !== 200) throw new Error(`NPD date read failed: ${res.statusCode}`);
-  const valueRanges = JSON.parse(res.body).valueRanges ?? [];
-  const colO  = (valueRanges[0]?.values ?? []).map(r => (r[0] ?? "").trim().toUpperCase());
-  const colAF = (valueRanges[1]?.values ?? []).map(r => (r[0] ?? "").trim());
-
-  const dateUpdates = [];
-  const npdUpdates  = [];
-  const maxLen = Math.max(colO.length, colAF.length);
-
-  for (let i = 0; i < maxLen; i++) {
-    const row     = DATA_START_ROW + i;
-    const npdText = colO[i]  ?? "";
-    const dateVal = colAF[i] ?? "";
-
-    if (npdText !== "NPD" && npdText !== "EPD") continue;
-
-    if (!dateVal) {
-      dateUpdates.push({ range: `${SHEET_TAB}!${DATE_ADDED_COL}${row}`, values: [[TODAY]] });
-    } else if (npdText === "NPD") {
-      const added = new Date(dateVal);
-      if (!isNaN(added)) {
-        const now = new Date();
-        const threshold = new Date(added);
-        threshold.setMonth(threshold.getMonth() + 3);
-        if (now >= threshold) {
-          npdUpdates.push({ range: `${SHEET_TAB}!O${row}`, values: [["EPD"]] });
-        }
-      }
-    }
-  }
-
-  if (dateUpdates.length === 0 && npdUpdates.length === 0) {
-    console.log("  ✓ No Date Added or NPD→EPD updates needed.");
-    return;
-  }
-
-  const allUpdates = [...dateUpdates, ...npdUpdates];
-  const writeRes = await withRetry(() => httpsRequest(
-    "POST",
-    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
-    JSON.stringify({ valueInputOption: "USER_ENTERED", data: allUpdates }),
-    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-  ));
-  if (writeRes.statusCode !== 200) throw new Error(`NPD date write failed: ${writeRes.body}`);
-  const result = JSON.parse(writeRes.body);
-  if (result.error) throw new Error(`NPD date write error: ${writeRes.body}`);
-  console.log(`  ✓ ${dateUpdates.length} Date Added set, ${npdUpdates.length} NPD→EPD transitions written`);
-}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Main
@@ -1552,19 +1482,15 @@ async function main() {
   await writeProjectedDemand(token, finalSkuRows, childToKits, kitParentSkus);
 
   // Step 9 — write Mother WH inventory to D2C sheet AF column
-  console.log("\n[9/11] Writing Mother WH inventory to D2C sheet (col AF)...");
+  console.log("\n[9/10] Writing Mother WH inventory to D2C sheet (col AF)...");
   await writeMotherWHStock(token);
 
   // Step 10 — write 7-day sold + DRR to D2C sheet cols AG / AH
-  console.log("\n[10/11] Writing 7d sold + DRR to D2C sheet (cols AG/AH)...");
+  console.log("\n[10/10] Writing 7d sold + DRR to D2C sheet (cols AG/AH)...");
   await write7dColumns(token, salesMap, skuTranslation);
 
-  // Step 11 — set Date Added (col AF in main sheet) for NPD/EPD rows; auto-transition NPD→EPD after 3 months
-  console.log("\n[11/11] Syncing Date Added + NPD→EPD transitions (main sheet col AF/O)...");
-  await syncNpdEpdDates(token);
-
   console.log("\n" + "═".repeat(58));
-  console.log("  Done. Cols G/K/L/N/U written from Shopify; M/R/T/V/W/X/Y/AB/AC/AD derived; NPD flags set; D2C AF = Mother WH stock; AG/AH = 7d sold/DRR; AF = Date Added, O auto-transitions NPD→EPD after 3mo.");
+  console.log("  Done. Cols G/K/L/N/U written from Shopify; M/R/T/U/V/W/X/Y/AB/AC/AD derived; NPD flags set; D2C AF = Mother WH stock; AG/AH = 7d sold/DRR.");
   console.log("═".repeat(58) + "\n");
 }
 

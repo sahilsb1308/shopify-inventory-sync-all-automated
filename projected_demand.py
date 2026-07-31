@@ -9,7 +9,7 @@ Calculates and writes all derived columns to the Inventory Dashboard sheet:
   W  – Projected Demand 7d          = (DRR*7 + kit_contrib) × multiplier
   X  – Projected Demand 30d         = (DRR*30 + kit_contrib) × multiplier
   Y  – Projected Revenue 30d        = X × ASP  (ASP = N/K)
-  M  – Revenue Multiplier           = MAX(AE=1→6, O=NPD→1.8, Q=1→1.5, R=1→1.2, AA score)
+  M  – Revenue Multiplier           = MAX(AE+Q→5x, AE→3x, Q=1→1.5, R=1→1.2, AA score)
   R  – Bestseller flag              = 1 if N ≥ median(N), else 0
   T  – Total Available Stock        = G + I + J
   AA – Priority                     = derived from AE, Q, AB
@@ -51,7 +51,6 @@ COL_K           = 10  # K – Total Sold 30d
 COL_OOS         = 11  # L – OOS Days
 COL_MULTIPLIER  = 12  # M – Revenue Multiplier (output)
 COL_REVENUE     = 13  # N – Gross Sales 30d
-COL_NPD_TEXT    = 14  # O – NPD text flag
 COL_PROMO_Q     = 16  # Q – Promo flag
 COL_BESTSELLER  = 17  # R – Bestseller flag (output)
 COL_S           = 18  # S – Last Month's Projection
@@ -120,7 +119,7 @@ def calc_stock_status(doi) -> str:
     return "Excess"
 
 
-def calc_multiplier(npd_flag: str, npd_text: str, promo_q: str, is_bestseller: int, priority: str) -> float:
+def calc_multiplier(npd_flag: str, promo_q: str, is_bestseller: int, priority: str) -> float:
     is_npd   = to_float(npd_flag) == 1
     is_focus = to_float(promo_q)  == 1
     # NPD + Focus → 5x; NPD alone → 3x
@@ -129,9 +128,8 @@ def calc_multiplier(npd_flag: str, npd_text: str, promo_q: str, is_bestseller: i
     # Otherwise take MAX of remaining signals
     priority_scores = {"P0": 1.5, "P1": 1.3, "P2": 1.2, "P3": 1.1}
     candidates = [
-        1.8 if npd_text.upper() == "NPD" else 0,
-        1.5 if is_focus                   else 0,
-        1.2 if is_bestseller == 1         else 0,
+        1.5 if is_focus           else 0,
+        1.2 if is_bestseller == 1 else 0,
         priority_scores.get(priority.upper(), 1),
     ]
     return max(candidates)
@@ -247,7 +245,6 @@ def main():
         n_val    = to_float(safe_col(row, COL_REVENUE),  default=0) or 0
         s_val    = to_float(safe_col(row, COL_S),        default=0) or 0
         npd_flag = safe_col(row, COL_NPD_FLAG)
-        npd_text = safe_col(row, COL_NPD_TEXT)
         promo_q  = safe_col(row, COL_PROMO_Q)
 
         # T – Total Available Stock
@@ -272,7 +269,7 @@ def main():
         priority_results.append([computed_priority])
 
         # M – Revenue Multiplier (depends on AA and R)
-        multiplier = calc_multiplier(npd_flag, npd_text, promo_q, is_bestseller, computed_priority)
+        multiplier = calc_multiplier(npd_flag, promo_q, is_bestseller, computed_priority)
         multiplier_results.append([multiplier])
 
         # AC – Fill Rate

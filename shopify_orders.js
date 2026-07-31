@@ -937,15 +937,28 @@ async function syncNpdExpiry(token, skuRows) {
     }
   }
 
-  // Read AE (NPD flag) and AI (NPD Start Date) from main sheet
+  // Read AE (NPD flag) and AI (NPD Start Date) from main sheet.
+  // If AI doesn't exist yet (400), treat as all blank — writes below will create it.
   const batchRes = await withRetry(() => httpsGet(
     `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet` +
     `?ranges=${encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`)}` +
     `&ranges=${encodeURIComponent(`${SHEET_TAB}!${NPD_START_DATE_COL}${DATA_START_ROW}:${NPD_START_DATE_COL}${lastRow}`)}`,
     { Authorization: `Bearer ${token}` }
   ));
-  if (batchRes.statusCode !== 200) throw new Error(`NPD expiry read failed: ${batchRes.statusCode}`);
-  const [aeVals, afVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
+  let aeVals = [], afVals = [];
+  if (batchRes.statusCode === 200) {
+    [aeVals, afVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
+  } else if (batchRes.statusCode === 400) {
+    // Col AI not yet in sheet grid — read AE alone so we can still stamp dates
+    console.log(`  Col AI not in grid yet — reading AE only, will stamp dates on first write`);
+    const aeOnly = await withRetry(() => httpsGet(
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`)}`,
+      { Authorization: `Bearer ${token}` }
+    ));
+    aeVals = aeOnly.statusCode === 200 ? (JSON.parse(aeOnly.body).values ?? []) : [];
+  } else {
+    throw new Error(`NPD expiry read failed: ${batchRes.statusCode}`);
+  }
 
   const mainUpdates = [];  // writes back to main sheet (AF stamps + AE clears)
   const expiredSkus = new Set();  // npdPrefix values to remove from allocation sheet

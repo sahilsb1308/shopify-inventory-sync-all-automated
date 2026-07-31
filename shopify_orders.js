@@ -80,6 +80,7 @@ const REV_CONTRIB_COL      = "AB";  // Revenue Contribution %
 const FILL_RATE_COL        = "AC";  // Fill Rate = (K + G) / S
 const UNITS_TO_FILL_COL    = "AD";  // Units to be Filled = MAX(0, X − G)
 const STOCK_COL            = "G";   // Ending Inventory Units
+const DATE_ADDED_COL       = "AF";  // Date Added — set when product first appears as NPD/EPD
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────
@@ -1193,6 +1194,71 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
   console.log(`  ✓ Cols M/R/T/V/W/X/Y/Z/AA/AB/AC/AD written for ${skuRows.length} rows`);
 }
 
+// ─── Date Added + NPD→EPD auto-transition ────────────────────────────────────
+// For every row in the main sheet where col O = "NPD" or "EPD":
+//   • If col AF (Date Added) is blank → write today's date (first time seen)
+//   • If col O = "NPD" and Date Added is 3+ months ago → change col O to "EPD"
+// Date Added is never overwritten once set.
+async function syncNpdEpdDates(token) {
+  const TODAY = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  const rangeO  = `${SHEET_TAB}!O${DATA_START_ROW}:O5000`;
+  const rangeAF = `${SHEET_TAB}!${DATE_ADDED_COL}${DATA_START_ROW}:${DATE_ADDED_COL}5000`;
+
+  const res = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet` +
+    `?ranges=${encodeURIComponent(rangeO)}&ranges=${encodeURIComponent(rangeAF)}`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  if (res.statusCode !== 200) throw new Error(`NPD date read failed: ${res.statusCode}`);
+  const valueRanges = JSON.parse(res.body).valueRanges ?? [];
+  const colO  = (valueRanges[0]?.values ?? []).map(r => (r[0] ?? "").trim().toUpperCase());
+  const colAF = (valueRanges[1]?.values ?? []).map(r => (r[0] ?? "").trim());
+
+  const dateUpdates = [];
+  const npdUpdates  = [];
+  const maxLen = Math.max(colO.length, colAF.length);
+
+  for (let i = 0; i < maxLen; i++) {
+    const row     = DATA_START_ROW + i;
+    const npdText = colO[i]  ?? "";
+    const dateVal = colAF[i] ?? "";
+
+    if (npdText !== "NPD" && npdText !== "EPD") continue;
+
+    if (!dateVal) {
+      dateUpdates.push({ range: `${SHEET_TAB}!${DATE_ADDED_COL}${row}`, values: [[TODAY]] });
+    } else if (npdText === "NPD") {
+      const added = new Date(dateVal);
+      if (!isNaN(added)) {
+        const now = new Date();
+        const threshold = new Date(added);
+        threshold.setMonth(threshold.getMonth() + 3);
+        if (now >= threshold) {
+          npdUpdates.push({ range: `${SHEET_TAB}!O${row}`, values: [["EPD"]] });
+        }
+      }
+    }
+  }
+
+  if (dateUpdates.length === 0 && npdUpdates.length === 0) {
+    console.log("  ✓ No Date Added or NPD→EPD updates needed.");
+    return;
+  }
+
+  const allUpdates = [...dateUpdates, ...npdUpdates];
+  const writeRes = await withRetry(() => httpsRequest(
+    "POST",
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
+    JSON.stringify({ valueInputOption: "USER_ENTERED", data: allUpdates }),
+    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  ));
+  if (writeRes.statusCode !== 200) throw new Error(`NPD date write failed: ${writeRes.body}`);
+  const result = JSON.parse(writeRes.body);
+  if (result.error) throw new Error(`NPD date write error: ${writeRes.body}`);
+  console.log(`  ✓ ${dateUpdates.length} Date Added set, ${npdUpdates.length} NPD→EPD transitions written`);
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Main
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1406,24 +1472,24 @@ async function main() {
 
   // Step 1 — authenticate with Google and read sheet SKUs first
   // (needed to build the SKU translation map before writing)
-  console.log("\n[1/5] Authenticating with Google Sheets...");
+  console.log("\n[1/11] Authenticating with Google Sheets...");
   const token   = await getGoogleAccessToken();
   console.log("  ✓ Access token obtained");
 
-  console.log("\n[2/5] Reading sheet SKUs...");
+  console.log("\n[2/11] Reading sheet SKUs...");
   const skuRows = await readSheetSKUs(token);
   console.log(`  ✓ ${skuRows.length} SKU rows found (rows ${DATA_START_ROW}–${skuRows[skuRows.length - 1]?.row})`);
 
   // Step 2 — fetch sales (orders + refunds)
-  console.log("\n[3/5] Fetching orders (Total Sales by Product)...");
+  console.log("\n[3/11] Fetching orders (Total Sales by Product)...");
   const salesMap = await fetchSalesReport();
 
   // Step 3 — fetch inventory
-  console.log("\n[4/5] Fetching inventory (Month End Inventory Snapshot)...");
+  console.log("\n[4/11] Fetching inventory (Month End Inventory Snapshot)...");
   const { stockMap, productNameMap } = await fetchInventoryReport();
 
   // Step 4 — build universal SKU translation map for ALL sheet SKUs
-  console.log("\n[5/5] Building SKU translation map and writing to sheet...");
+  console.log("\n[5/11] Building SKU translation map and writing to sheet...");
   const sheetSkuList = skuRows.map(r => r.sku);
   const skuTranslation = buildSkuTranslationMap(sheetSkuList, stockMap, salesMap);
 
@@ -1441,7 +1507,7 @@ async function main() {
   await writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation);
 
   // Step 6 — append new rows for SKUs sold in last 3 days but not yet in sheet
-  console.log("\n[6/7] Checking for new products sold in last 30 days...");
+  console.log("\n[6/11] Checking for new products sold in last 30 days...");
   const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation);
   console.log(`  ${newSkus.length === 0 ? "✓ No new unmatched products found." : `⚡ ${newSkus.length} new SKU(s) to append`}`);
   // Re-read the sheet to get the true last row right before appending —
@@ -1454,14 +1520,14 @@ async function main() {
   if (!DRY_RUN) await appendNewProductRows(token, newSkus, salesMap, stockMap, productNameMap, lastRow);
 
   // Step 7 — read NPD allocation sheet and mark column AE = 1 for matching SKUs
-  console.log("\n[7/8] Syncing NPD flags from allocation sheet...");
+  console.log("\n[7/11] Syncing NPD flags from allocation sheet...");
   const npdSkus = await fetchNpdSkus(token);
   console.log(`  Total NPD SKUs across all tabs: ${npdSkus.size}`);
   const latestSkuRows = await readSheetSKUs(token);
   await markNpdFlags(token, latestSkuRows, npdSkus);
 
   // Step 8 — calculate and write projected demand (col X)
-  console.log("\n[8/8] Writing projected demand (col X)...");
+  console.log("\n[8/11] Writing projected demand (col X)...");
   const { childToKits, kitParentSkus } = await readKitsSheet(token);
   console.log(`  Kits sheet: ${kitParentSkus.size} kit parent SKUs, ${Object.keys(childToKits).length} child SKUs`);
   if (kitParentSkus.size > 0) console.log(`  Sample kit parents: ${[...kitParentSkus].slice(0, 5).join(", ")}`);
@@ -1469,15 +1535,19 @@ async function main() {
   await writeProjectedDemand(token, finalSkuRows, childToKits, kitParentSkus);
 
   // Step 9 — write Mother WH inventory to D2C sheet AF column
-  console.log("\n[9/10] Writing Mother WH inventory to D2C sheet (col AF)...");
+  console.log("\n[9/11] Writing Mother WH inventory to D2C sheet (col AF)...");
   await writeMotherWHStock(token);
 
   // Step 10 — write 7-day sold + DRR to D2C sheet cols AG / AH
-  console.log("\n[10/10] Writing 7d sold + DRR to D2C sheet (cols AG/AH)...");
+  console.log("\n[10/11] Writing 7d sold + DRR to D2C sheet (cols AG/AH)...");
   await write7dColumns(token, salesMap, skuTranslation);
 
+  // Step 11 — set Date Added (col AF in main sheet) for NPD/EPD rows; auto-transition NPD→EPD after 3 months
+  console.log("\n[11/11] Syncing Date Added + NPD→EPD transitions (main sheet col AF/O)...");
+  await syncNpdEpdDates(token);
+
   console.log("\n" + "═".repeat(58));
-  console.log("  Done. Cols G/K/L/N/U written from Shopify; M/R/T/V/W/X/Y/AB/AC/AD derived; NPD flags set; D2C AF = Mother WH stock; AG/AH = 7d sold/DRR.");
+  console.log("  Done. Cols G/K/L/N/U written from Shopify; M/R/T/V/W/X/Y/AB/AC/AD derived; NPD flags set; D2C AF = Mother WH stock; AG/AH = 7d sold/DRR; AF = Date Added, O auto-transitions NPD→EPD after 3mo.");
   console.log("═".repeat(58) + "\n");
 }
 

@@ -1029,6 +1029,22 @@ async function syncNpdExpiry(token, skuRows) {
     }
   }
 
+  // Write header for AI1 if blank
+  const hdrRes = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(`${SHEET_TAB}!${NPD_START_DATE_COL}1`)}`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  const existingHdr = (JSON.parse(hdrRes.body).values ?? [])[0]?.[0] ?? "";
+  if (!existingHdr) {
+    await withRetry(() => httpsRequest(
+      "POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
+      JSON.stringify({ valueInputOption: "RAW", data: [{ range: `${SHEET_TAB}!${NPD_START_DATE_COL}1`, values: [["NPD Start Date"]] }] }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    ));
+    console.log(`  Wrote header "NPD Start Date" to ${NPD_START_DATE_COL}1`);
+  }
+
   // Read Q (NPD flag) and AI (NPD Start Date) from main sheet.
   // If AI doesn't exist yet (400), treat as all blank — writes below will create it.
   const batchRes = await withRetry(() => httpsGet(

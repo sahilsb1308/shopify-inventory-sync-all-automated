@@ -85,6 +85,7 @@ const REV_CONTRIB_COL      = "AC";  // Revenue Contribution %
 const FILL_RATE_COL        = "AD";  // Fill Rate
 const UNITS_TO_FILL_COL    = "AE";  // Units to be Filled = MAX(0, Y − U)
 const NPD_START_DATE_COL   = "AI";  // NPD Start Date — stamped when AE first becomes 1; cleared on expiry
+const KIT_CHILD_FLAG_COL   = "AJ";  // 1 if this SKU is a child component of any kit
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────
@@ -1636,6 +1637,55 @@ async function write7dColumns(token, salesMap, skuTranslation) {
   console.log(`  ✓ AG/AH written — ${written} SKUs had 7d sales (window: ${D7_AGO_DATE} → today)`);
 }
 
+// ─── Kit Child Flag sync ──────────────────────────────────────────────────────
+// Reads child SKUs from "Kits - Child SKUs"!D:D and sets AJ=1 in Inventory
+// Dashboard for any row whose SKU (col B) matches a child SKU.
+async function syncKitChildFlags(token, childSkuSet) {
+  const res = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!B1:B`)}`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  if (res.statusCode !== 200) throw new Error(`Kit child flag read failed: ${res.statusCode}`);
+
+  const rows   = JSON.parse(res.body).values ?? [];
+  const header = (rows[0]?.[0] ?? "").toString().trim();
+  const data   = rows.slice(1);
+
+  // Ensure header in AJ1
+  const hdrRes = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!${KIT_CHILD_FLAG_COL}1`)}`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  const existingHdr = (JSON.parse(hdrRes.body).values ?? [])[0]?.[0] ?? "";
+  if (!existingHdr) {
+    await withRetry(() => httpsRequest(
+      "POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
+      JSON.stringify({ valueInputOption: "RAW", data: [{ range: `${D2C_TAB}!${KIT_CHILD_FLAG_COL}1`, values: [["Kit SKU"]] }] }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    ));
+    console.log(`  Wrote header "Kit SKU" to ${KIT_CHILD_FLAG_COL}1`);
+  }
+
+  const updates = [];
+  data.forEach((row, i) => {
+    const sku    = (row[0] ?? "").toString().trim().toUpperCase();
+    const rowNum = i + 2;
+    const flag   = childSkuSet.has(sku) ? 1 : "";
+    updates.push({ range: `${D2C_TAB}!${KIT_CHILD_FLAG_COL}${rowNum}`, values: [[flag]] });
+  });
+
+  if (updates.length === 0) return;
+  await withRetry(() => httpsRequest(
+    "POST",
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
+    JSON.stringify({ valueInputOption: "RAW", data: updates }),
+    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  ));
+  const count = updates.filter(u => u.values[0][0] === 1).length;
+  console.log(`  Kit child flag: ${count} SKUs marked as 1, ${updates.length - count} cleared`);
+}
+
 async function main() {
   console.log("═".repeat(58));
   console.log("  Shopify Reports → Google Sheets");
@@ -1713,9 +1763,16 @@ async function main() {
   const focusSkus = await fetchFocusSkus(token);
   await markFocusFlags(token, focusSkus);
 
+  // Step 7c — read kits sheet (reused by both kit child flag sync and projected demand)
+  const { childToKits, kitParentSkus } = await readKitsSheet(token);
+
+  // Step 7d — sync Kit SKU flag (AJ=1 for child SKUs)
+  console.log("\n[7d] Syncing Kit SKU flags (col AJ)...");
+  const childSkuSet = new Set(Object.keys(childToKits).map(s => s.toUpperCase()));
+  await syncKitChildFlags(token, childSkuSet);
+
   // Step 8 — calculate and write projected demand (col X)
   console.log("\n[8/10] Writing projected demand (col X)...");
-  const { childToKits, kitParentSkus } = await readKitsSheet(token);
   console.log(`  Kits sheet: ${kitParentSkus.size} kit parent SKUs, ${Object.keys(childToKits).length} child SKUs`);
   if (kitParentSkus.size > 0) console.log(`  Sample kit parents: ${[...kitParentSkus].slice(0, 5).join(", ")}`);
   const finalSkuRows = await readSheetSKUs(token);

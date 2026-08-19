@@ -4,18 +4,18 @@ projected_demand.py
 
 Calculates and writes all derived columns to the Inventory Dashboard sheet:
 
-  U  – DRR (Daily Run Rate)         = K / (30 − L)
-  V  – Days of Inventory            = G / U
-  W  – Projected Demand 7d          = (DRR*7 + kit_contrib) × multiplier
-  X  – Projected Demand 30d         = (DRR*30 + kit_contrib) × multiplier
-  Y  – Projected Revenue 30d        = X × ASP  (ASP = N/K)
-  M  – Revenue Multiplier           = MAX(AE+Q→5x, AE→3x, Q=1→1.5, R=1→1.2, AA score)
-  R  – Bestseller flag              = 1 if N ≥ median(N), else 0
-  T  – Total Available Stock        = G + I + J
-  AA – Priority                     = derived from AE, Q, AB
-  AB – Revenue Contribution %       = (N / SUM(N)) × 100
-  AC – Fill Rate                    = (K + G) / S
-  AD – Units to be Filled           = MAX(0, X − G)
+  V  – DRR (Daily Run Rate)         = J / (30 − K)
+  W  – Days of Inventory            = U / V
+  X  – Projected Demand 7d          = (DRR*7 + kit_contrib) × multiplier
+  Y  – Projected Demand 30d         = (DRR*30 + kit_contrib) × multiplier
+  Z  – Projected Revenue 30d        = Y × ASP  (ASP = M/J)
+  L  – Revenue Multiplier           = MAX(Q+P→5x, Q→3x, P=1→1.5, R=1→1.2, AB score)
+  R  – Bestseller flag              = 1 if M ≥ median(M), else 0
+  T  – Total Available Stock        = U + H + I
+  AB – Priority                     = derived from Q, P, AC
+  AC – Revenue Contribution %       = (M / SUM(M)) × 100
+  AD – Fill Rate                    = (J + U) / S
+  AE – Units to be Filled           = MAX(0, Y − U)
 
 Column indices (0-based, matched to actual sheet layout):
   B=1  H=7  I=8  J=9  K=10  L=11  M=12  P=15  Q=16
@@ -247,11 +247,11 @@ def main():
         npd_flag = safe_col(row, COL_NPD_FLAG)
         promo_q  = safe_col(row, COL_PROMO_Q)
 
-        # T – Total Available Stock
+        # T – Total Available Stock = U + H + I
         t_val = g_val + i_val + j_val
         total_stock_results.append([t_val])
 
-        # U – DRR
+        # V – DRR
         drr = calc_drr(k_val, oos_days)
         drr_results.append([drr if drr is not None else ""])
 
@@ -260,19 +260,19 @@ def main():
         is_bestseller = 1 if (n_raw is not None and n_raw >= n_median) else 0
         bestseller_results.append([is_bestseller])
 
-        # AB – Revenue Contribution %
+        # AC – Revenue Contribution %
         ab_val = round((n_val / total_n) * 100, 4) if total_n > 0 else 0
         rev_contrib_results.append([ab_val])
 
-        # AA – Priority (depends on AB)
+        # AB – Priority (depends on AC)
         computed_priority = calc_priority(npd_flag, promo_q, ab_val)
         priority_results.append([computed_priority])
 
-        # M – Revenue Multiplier (depends on AA and R)
+        # L – Revenue Multiplier (depends on AB and R)
         multiplier = calc_multiplier(npd_flag, promo_q, is_bestseller, computed_priority)
         multiplier_results.append([multiplier])
 
-        # AC – Fill Rate
+        # AD – Fill Rate = (J + U) / S
         fill_rate = round((k_val + g_val) / s_val, 4) if s_val != 0 else 0
         fill_rate_results.append([fill_rate])
 
@@ -311,30 +311,30 @@ def main():
         if is_child and kit_drr > 0:
             drr_results[-1] = [round(effective_drr, 2)]
 
-        # V – Days of Inventory (uses effective DRR for child SKUs)
+        # W – Days of Inventory = U / DRR (uses effective DRR for child SKUs)
         if effective_drr > 0:
             doi_val = round(g_val / effective_drr, 2)
         else:
             doi_val = 0
         doi_results.append([doi_val])
 
-        # Z – Stock Status
+        # AA – Stock Status
         stock_status_results.append([calc_stock_status(doi_val)])
 
-        # W – Projected Demand 7d
+        # X – Projected Demand 7d
         demand_7d = round(effective_drr * 7 * multiplier)
         demand_7d_results.append([demand_7d])
 
-        # X – Projected Demand 30d
+        # Y – Projected Demand 30d
         demand_30d = round(effective_drr * 30 * multiplier)
         demand_results.append([demand_30d])
 
-        # Y – Projected Revenue 30d  (ASP = N/K)
+        # Z – Projected Revenue 30d  (ASP = M/J)
         asp = round(n_val / k_val, 4) if k_val > 0 else 0
         proj_rev = round(demand_30d * asp, 2)
         proj_rev_results.append([proj_rev])
 
-        # AD – Units to be Filled
+        # AE – Units to be Filled
         units_fill = max(0, demand_30d - g_val)
         units_fill_results.append([round(units_fill, 2)])
 

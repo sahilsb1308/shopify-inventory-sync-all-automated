@@ -1029,7 +1029,7 @@ async function syncNpdExpiry(token, skuRows) {
     }
   }
 
-  // Read AE (NPD flag) and AI (NPD Start Date) from main sheet.
+  // Read Q (NPD flag) and AI (NPD Start Date) from main sheet.
   // If AI doesn't exist yet (400), treat as all blank — writes below will create it.
   const batchRes = await withRetry(() => httpsGet(
     `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet` +
@@ -1041,8 +1041,8 @@ async function syncNpdExpiry(token, skuRows) {
   if (batchRes.statusCode === 200) {
     [aeVals, afVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
   } else if (batchRes.statusCode === 400) {
-    // Col AI not yet in sheet grid — read AE alone so we can still stamp dates
-    console.log(`  Col AI not in grid yet — reading AE only, will stamp dates on first write`);
+    // Col AI not yet in sheet grid — read Q alone so we can still stamp dates
+    console.log(`  Col AI not in grid yet — reading Q only, will stamp dates on first write`);
     const aeOnly = await withRetry(() => httpsGet(
       `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`)}`,
       { Authorization: `Bearer ${token}` }
@@ -1052,7 +1052,7 @@ async function syncNpdExpiry(token, skuRows) {
     throw new Error(`NPD expiry read failed: ${batchRes.statusCode}`);
   }
 
-  const mainUpdates = [];  // writes back to main sheet (AF stamps + AE clears)
+  const mainUpdates = [];  // writes back to main sheet (AI stamps + Q clears)
   const expiredSkus = new Set();  // npdPrefix values to remove from allocation sheet
 
   for (const { sku, row } of skuRows) {
@@ -1072,7 +1072,7 @@ async function syncNpdExpiry(token, skuRows) {
         threshold.setMonth(threshold.getMonth() + 3);
         if (new Date() >= threshold) {
           expiredSkus.add(npdPrefix(sku));
-          // Clear AE and AF so if user re-adds to NPD sheet the clock resets
+          // Clear Q and AI so if user re-adds to NPD sheet the clock resets
           mainUpdates.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`,       values: [[""]] });
           mainUpdates.push({ range: `${SHEET_TAB}!${NPD_START_DATE_COL}${row}`, values: [[""]] });
         }
@@ -1263,23 +1263,23 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     const sVal    = sRaw !== "" ? parseFloat(sRaw) || 0 : 0;
     const isChild = sku in childToKits;
 
-    // Col R — Bestseller: 1 if N ≥ median of all non-blank N values
+    // Col R — Bestseller: 1 if M ≥ median of all non-blank M values
     const isBestseller = nRaw !== "" && nVal >= nMedian ? 1 : 0;
     colR[i] = [isBestseller];
     rowState.set(i, { npdFlag, promoQ, isBestseller });
 
-    // Col T — Total Available Stock = G + I + J (0 if any blank)
+    // Col T — Total Available Stock = U + H + I (0 if any blank)
     if (gRaw === "" || iRaw === "" || jRaw === "") {
       colT[i] = [0];
     } else {
       colT[i] = [(parseFloat(gRaw) || 0) + (parseFloat(iRaw) || 0) + (parseFloat(jRaw) || 0)];
     }
 
-    // Col AB — Revenue Contribution %
+    // Col AC — Revenue Contribution %
     const abVal = nRaw !== "" && totalN > 0 ? parseFloat(((nVal / totalN) * 100).toFixed(4)) : 0;
     colAB[i] = [abVal];
 
-    // Col AA — Priority (computed from AE, Q, AB — in that order)
+    // Col AB — Priority (computed from Q, P, AC — in that order)
     let computedPriority;
     try {
       if      (abVal > 1)    computedPriority = "P0";
@@ -1289,7 +1289,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     } catch (_) { computedPriority = "P3"; }
     colAA[i] = [computedPriority];
 
-    // Col M — Revenue Multiplier (uses computedPriority, not stale sheet AA)
+    // Col L — Revenue Multiplier (uses computedPriority, not stale sheet AB)
     const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
     const mScore = Math.max(
       Number(npdFlag) === 1 ? (Number(promoQ) === 1 ? 5 : 3) : 0,
@@ -1299,14 +1299,14 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     );
     colM[i] = [mScore];
 
-    // Col AC — Fill Rate = (K + G) / S
+    // Col AD — Fill Rate = (J + U) / S
     colAC[i] = [sVal > 0 ? parseFloat(((kVal + gVal) / sVal).toFixed(4)) : 0];
 
-    // Col V — Days of Inventory = G / DRR
+    // Col W — Days of Inventory = U / DRR
     const doiVal = drr && drr > 0 && gVal > 0 ? parseFloat((gVal / drr).toFixed(2)) : 0;
     colV[i] = drr !== null ? [doiVal] : [""];
 
-    // Col Z — Stock Status
+    // Col AA — Stock Status
     colZ[i] = [drr !== null ? calcStockStatus(doiVal) : ""];
 
     // No DRR and not a kit child → blank demand columns

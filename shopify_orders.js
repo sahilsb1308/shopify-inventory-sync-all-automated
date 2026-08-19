@@ -698,7 +698,7 @@ function calcOosDays(dailyUnits, threshold) {
 function calcDrr(netSold, oosDays) {
   const available = 30 - oosDays;
   if (available <= 0) return null;
-  return Math.round((netSold / available) * 100) / 100;
+  return Math.round(netSold / available);
 }
 
 function calcStockStatus(doi) {
@@ -1303,7 +1303,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     colAC[i] = [sVal > 0 ? parseFloat(((kVal + gVal) / sVal).toFixed(4)) : 0];
 
     // Col W — Days of Inventory = U / DRR
-    const doiVal = drr && drr > 0 && gVal > 0 ? parseFloat((gVal / drr).toFixed(2)) : 0;
+    const doiVal = drr && drr > 0 && gVal > 0 ? Math.round(gVal / drr) : 0;
     colV[i] = drr !== null ? [doiVal] : [""];
 
     // Col AA — Stock Status
@@ -1330,8 +1330,8 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
 
     // For child SKUs with kit DRR: update U, V, Z to reflect effective demand rate
     if (isChild && kitDrr > 0) {
-      colU[i] = [Math.round(effectiveDrr * 100) / 100];
-      const effDoi = effectiveDrr > 0 ? parseFloat((gVal / effectiveDrr).toFixed(2)) : 0;
+      colU[i] = [Math.round(effectiveDrr)];
+      const effDoi = effectiveDrr > 0 ? Math.round(gVal / effectiveDrr) : 0;
       colV[i] = [effDoi];
       colZ[i] = [calcStockStatus(effDoi)];
     }

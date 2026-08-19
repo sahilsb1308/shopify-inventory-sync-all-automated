@@ -38,7 +38,7 @@ const SERVICE_ACCOUNT_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "service
 const SHEET_ID             = process.env.GOOGLE_SHEET_ID || "1Y2EaDjGfMwscmpn9h7oR_mTOSVxErqWHeowftX01KdI";
 const SHEET_TAB            = "Inventory Dashboard";
 // SHEET_GID looked up dynamically in appendNewProductRows — do not hardcode
-const NPD_FLAG_COL         = "AE";  // Column in Inventory Dashboard to mark NPD = 1
+const NPD_FLAG_COL         = "Q";   // Column in Inventory Dashboard to mark NPD = 1
 
 // ─── D2C all-automated sheet (Mother WH stock column AF) ─────────────────────
 const D2C_SHEET_ID         = "1ILrx79KdCV1-RDdwQPrrGsGyKe4s2698r3Mwcu9L18M";
@@ -52,7 +52,7 @@ const MOTHER_WH_COL        = "AF";
 
 // ─── Focus Allocation sheet (separate spreadsheet) ───────────────────────────
 const FOCUS_SHEET_ID = "1OAJblwHn0Twxgzfr-MoncAmC1ED-KtN1fzchR53a7AI";
-const FOCUS_FLAG_COL = "Q";  // Column in Inventory Dashboard to mark Focus = 1
+const FOCUS_FLAG_COL = "P";  // Column in Inventory Dashboard to mark Focus = 1
 
 // ─── NPD Allocation sheet (separate spreadsheet) ─────────────────────────────
 const NPD_SHEET_ID  = "1Ubwo5ElTn4AH1zIWqZUOsjhvo-SZ_t_i2dZkCLOaKHw";
@@ -64,26 +64,26 @@ const NPD_TABS      = [
 ];
 
 const SKU_COL              = "B";
-const RTO_STOCK_COL        = "I";   // RTO Stock
-const INWARD_STOCK_COL     = "J";   // Inward Stock
-const UNITS_COL            = "K";   // Net Items Sold
-const OOS_DAYS_COL         = "L";   // OOS Days (priority-based: P0/P1 ≤5, P2 ≤1, P3 =0)
-const MULTIPLIER_COL       = "M";   // Revenue Multiplier
-const REVENUE_COL          = "N";   // Gross Sales
-const BESTSELLER_COL       = "R";   // Bestseller flag (1 if N ≥ median N)
+const RTO_STOCK_COL        = "H";   // RTO Stock
+const INWARD_STOCK_COL     = "I";   // Inward Stock
+const UNITS_COL            = "J";   // Net Items Sold (Total Sold Last 30D)
+const OOS_DAYS_COL         = "K";   // OOS Days
+const MULTIPLIER_COL       = "L";   // Revenue Multiplier
+const REVENUE_COL          = "M";   // Gross Sales
+const BESTSELLER_COL       = "R";   // Bestseller flag (1 if revenue ≥ median)
 const LAST_MONTH_PROJ_COL  = "S";   // Last Month's Projection
-const TOTAL_STOCK_COL      = "T";   // Total Available Stock = G + I + J
-const DRR_COL              = "U";   // Daily Run Rate = K / (30 − OOS Days)
-const DOI_COL              = "V";   // Days of Inventory = G / U
-const DEMAND_7D_COL        = "W";   // Projected Demand 7d
-const DEMAND_COL           = "X";   // Projected Demand 30d
-const PROJ_REV_COL         = "Y";   // Projected Revenue 30d
-const STOCK_STATUS_COL     = "Z";   // Stock Status (output)
-const PRIORITY_COL         = "AA";  // Priority P0–P3 (output)
-const REV_CONTRIB_COL      = "AB";  // Revenue Contribution %
-const FILL_RATE_COL        = "AC";  // Fill Rate = (K + G) / S
-const UNITS_TO_FILL_COL    = "AD";  // Units to be Filled = MAX(0, X − G)
-const STOCK_COL            = "G";   // Ending Inventory Units
+const TOTAL_STOCK_COL      = "T";   // Total Available Stock
+const STOCK_COL            = "U";   // Current Stock (Ending Inventory Units)
+const DRR_COL              = "V";   // Daily Run Rate = J / (30 − K)
+const DOI_COL              = "W";   // Days of Inventory = U / V
+const DEMAND_7D_COL        = "X";   // Projected Demand 7d
+const DEMAND_COL           = "Y";   // Projected Demand 30d
+const PROJ_REV_COL         = "Z";   // Projected Revenue 30d
+const STOCK_STATUS_COL     = "AA";  // Stock Status (output)
+const PRIORITY_COL         = "AB";  // Priority P0–P3 (output)
+const REV_CONTRIB_COL      = "AC";  // Revenue Contribution %
+const FILL_RATE_COL        = "AD";  // Fill Rate
+const UNITS_TO_FILL_COL    = "AE";  // Units to be Filled = MAX(0, Y − U)
 const NPD_START_DATE_COL   = "AI";  // NPD Start Date — stamped when AE first becomes 1; cleared on expiry
 const DATA_START_ROW       = 2;
 
@@ -538,20 +538,20 @@ async function appendNewProductRows(token, newSkus, salesMap, stockMap, productN
 
   // Validate: catch any non-string/number values that would cause a 400
   colB.forEach(([v], i) => { if (typeof v !== "string") console.warn(`  ⚠ colB[${i}] not a string:`, v); });
-  colG.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ colG[${i}] not a number:`, v); });
-  colK.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ colK[${i}] not a number:`, v); });
-  colL.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ colL[${i}] not a number:`, v); });
-  colN.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ colN[${i}] not a number:`, v); });
+  colG.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ stock[${i}] not a number:`, v); });
+  colK.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ sold[${i}] not a number:`, v); });
+  colL.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ oos[${i}] not a number:`, v); });
+  colN.forEach(([v], i) => { if (typeof v !== "number") console.warn(`  ⚠ revenue[${i}] not a number:`, v); });
 
   // Log exactly what is being written and where
   console.log(`\n  Writing ${newSkus.length} new rows:`);
   console.log(`    B${startRow}:B${endRow}  → SKU`);
   console.log(`    C${startRow}:C${endRow}  → Product Name`);
-  console.log(`    G${startRow}:G${endRow}  → Current Stock`);
-  console.log(`    K${startRow}:K${endRow}  → Net Items Sold`);
-  console.log(`    L${startRow}:L${endRow}  → OOS Days`);
-  console.log(`    N${startRow}:N${endRow}  → Revenue`);
-  console.log(`    U${startRow}:U${endRow}  → DRR`);
+  console.log(`    ${STOCK_COL}${startRow}:${STOCK_COL}${endRow}  → Current Stock`);
+  console.log(`    ${UNITS_COL}${startRow}:${UNITS_COL}${endRow}  → Net Items Sold`);
+  console.log(`    ${OOS_DAYS_COL}${startRow}:${OOS_DAYS_COL}${endRow}  → OOS Days`);
+  console.log(`    ${REVENUE_COL}${startRow}:${REVENUE_COL}${endRow}  → Revenue`);
+  console.log(`    ${DRR_COL}${startRow}:${DRR_COL}${endRow}  → DRR`);
 
   // Look up the real numeric sheetId for SHEET_TAB (can't hardcode — differs per file)
   const metaRes = await httpsGet(
@@ -594,13 +594,13 @@ async function appendNewProductRows(token, newSkus, salesMap, stockMap, productN
       JSON.stringify({
         valueInputOption: "RAW",
         data: [
-          { range: `${SHEET_TAB}!B${startRow}:B${endRow}`, values: colB },
-          { range: `${SHEET_TAB}!C${startRow}:C${endRow}`, values: colC },
-          { range: `${SHEET_TAB}!G${startRow}:G${endRow}`, values: colG },
-          { range: `${SHEET_TAB}!K${startRow}:K${endRow}`, values: colK },
-          { range: `${SHEET_TAB}!L${startRow}:L${endRow}`, values: colL },
-          { range: `${SHEET_TAB}!N${startRow}:N${endRow}`, values: colN },
-          { range: `${SHEET_TAB}!U${startRow}:U${endRow}`, values: colU },
+          { range: `${SHEET_TAB}!B${startRow}:B${endRow}`,                             values: colB },
+          { range: `${SHEET_TAB}!C${startRow}:C${endRow}`,                             values: colC },
+          { range: `${SHEET_TAB}!${STOCK_COL}${startRow}:${STOCK_COL}${endRow}`,       values: colG },
+          { range: `${SHEET_TAB}!${UNITS_COL}${startRow}:${UNITS_COL}${endRow}`,       values: colK },
+          { range: `${SHEET_TAB}!${OOS_DAYS_COL}${startRow}:${OOS_DAYS_COL}${endRow}`, values: colL },
+          { range: `${SHEET_TAB}!${REVENUE_COL}${startRow}:${REVENUE_COL}${endRow}`,   values: colN },
+          { range: `${SHEET_TAB}!${DRR_COL}${startRow}:${DRR_COL}${endRow}`,           values: colU },
         ]
       }),
       { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
@@ -809,7 +809,7 @@ async function writeToSheet(token, skuRows, salesMap, stockMap, skuTranslation =
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// NPD Flag — read NPD allocation sheet and mark column AE = 1 in dashboard
+// NPD Flag — read NPD allocation sheet and mark column Q = 1 in dashboard
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
@@ -1189,15 +1189,15 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
 
   // Batch-read all columns needed for derived calculations
   const ranges = [
-    `${SHEET_TAB}!Q${DATA_START_ROW}:Q${lastRow}`,   // Promo Q
-    `${SHEET_TAB}!U${DATA_START_ROW}:U${lastRow}`,   // DRR (just written)
-    `${SHEET_TAB}!K${DATA_START_ROW}:K${lastRow}`,   // Net Sold (just written)
-    `${SHEET_TAB}!AE${DATA_START_ROW}:AE${lastRow}`, // NPD flag
-    `${SHEET_TAB}!N${DATA_START_ROW}:N${lastRow}`,   // Gross Sales (just written)
-    `${SHEET_TAB}!G${DATA_START_ROW}:G${lastRow}`,   // Current Stock (just written)
-    `${SHEET_TAB}!I${DATA_START_ROW}:I${lastRow}`,   // RTO Stock
-    `${SHEET_TAB}!J${DATA_START_ROW}:J${lastRow}`,   // Inward Stock
-    `${SHEET_TAB}!S${DATA_START_ROW}:S${lastRow}`,   // Last Month's Projection
+    `${SHEET_TAB}!${FOCUS_FLAG_COL}${DATA_START_ROW}:${FOCUS_FLAG_COL}${lastRow}`,   // Focus flag (P)
+    `${SHEET_TAB}!${DRR_COL}${DATA_START_ROW}:${DRR_COL}${lastRow}`,                // DRR (just written)
+    `${SHEET_TAB}!${UNITS_COL}${DATA_START_ROW}:${UNITS_COL}${lastRow}`,             // Net Sold (just written)
+    `${SHEET_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`,       // NPD flag (Q)
+    `${SHEET_TAB}!${REVENUE_COL}${DATA_START_ROW}:${REVENUE_COL}${lastRow}`,         // Gross Sales (just written)
+    `${SHEET_TAB}!${STOCK_COL}${DATA_START_ROW}:${STOCK_COL}${lastRow}`,             // Current Stock (just written)
+    `${SHEET_TAB}!${RTO_STOCK_COL}${DATA_START_ROW}:${RTO_STOCK_COL}${lastRow}`,     // RTO Stock
+    `${SHEET_TAB}!${INWARD_STOCK_COL}${DATA_START_ROW}:${INWARD_STOCK_COL}${lastRow}`, // Inward Stock
+    `${SHEET_TAB}!${LAST_MONTH_PROJ_COL}${DATA_START_ROW}:${LAST_MONTH_PROJ_COL}${lastRow}`, // Last Month's Projection
   ];
   const batchUrl = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet?${ranges.map(r => `ranges=${encodeURIComponent(r)}`).join("&")}`;
   const batchRes = await withRetry(() => httpsGet(batchUrl, { Authorization: `Bearer ${token}` }));
@@ -1419,7 +1419,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     )
   );
   if (res.statusCode !== 200) throw new Error(`Derived cols write error ${res.statusCode}: ${res.body}`);
-  console.log(`  ✓ Cols M/R/T/U/V/W/X/Y/Z/AA/AB/AC/AD written for ${skuRows.length} rows (U = effective DRR for kit children)`);
+  console.log(`  ✓ Cols L/R/T/V/W/X/Y/Z/AA/AB/AC/AD/AE written for ${skuRows.length} rows (V = effective DRR for kit children)`);
 }
 
 

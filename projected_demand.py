@@ -17,10 +17,10 @@ Calculates and writes all derived columns to the Inventory Dashboard sheet:
   AC – Fill Rate                    = (K + G) / S
   AD – Units to be Filled           = MAX(0, X − G)
 
-Column indices (0-based):
-  B=1  G=6  I=8  J=9  K=10  L=11  M=12  N=13  O=14  Q=16
-  R=17 S=18 T=19 U=20 V=21  W=22  X=23  Y=24  AA=26 AB=27
-  AC=28 AD=29 AE=30
+Column indices (0-based, matched to actual sheet layout):
+  B=1  H=7  I=8  J=9  K=10  L=11  M=12  P=15  Q=16
+  R=17 S=18 T=19 U=20 V=21  W=22  X=23  Y=24  Z=25
+  AA=26 AB=27 AC=28 AD=29 AE=30
 
 Usage:
   pip install gspread google-auth
@@ -42,30 +42,30 @@ DATA_START_ROW = 2
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# ─── Column indices (0-based) ─────────────────────────────────────────────────
-COL_SKU         = 1   # B
-COL_STOCK       = 6   # G – Current Stock
-COL_I           = 8   # I – RTO Stock
-COL_J           = 9   # J – Inward Stock
-COL_K           = 10  # K – Total Sold 30d
-COL_OOS         = 11  # L – OOS Days
-COL_MULTIPLIER  = 12  # M – Revenue Multiplier (output)
-COL_REVENUE     = 13  # N – Gross Sales 30d
-COL_PROMO_Q     = 16  # Q – Promo flag
-COL_BESTSELLER  = 17  # R – Bestseller flag (output)
-COL_S           = 18  # S – Last Month's Projection
-COL_T           = 19  # T – Total Available Stock (output)
-COL_DRR         = 20  # U – Daily Run Rate (output)
-COL_DOI         = 21  # V – Days of Inventory (output)
-COL_DEMAND_7D   = 22  # W – Projected Demand 7d (output)
-COL_DEMAND      = 23  # X – Projected Demand 30d (output)
-COL_PROJ_REV    = 24  # Y – Projected Revenue 30d (output)
-COL_STOCK_STATUS = 25 # Z – Stock Status (output)
-COL_PRIORITY    = 26  # AA – Priority (output)
-COL_REV_CONTRIB = 27  # AB – Revenue Contribution % (output)
-COL_FILL_RATE   = 28  # AC – Fill Rate (output)
-COL_UNITS_FILL  = 29  # AD – Units to be Filled (output)
-COL_NPD_FLAG    = 30  # AE – NPD numeric flag
+# ─── Column indices (0-based, verified against actual sheet headers) ─────────
+COL_SKU         = 1   # B  – SKU
+COL_I           = 7   # H  – RTO Stock
+COL_J           = 8   # I  – Inward Stock
+COL_K           = 9   # J  – Total Sold 30d
+COL_OOS         = 10  # K  – OOS Days
+COL_MULTIPLIER  = 11  # L  – Revenue Multiplier (output)
+COL_REVENUE     = 12  # M  – Gross Sales 30d
+COL_PROMO_Q     = 15  # P  – Focus flag
+COL_NPD_FLAG    = 16  # Q  – NPD numeric flag
+COL_BESTSELLER  = 17  # R  – Bestseller flag (output)
+COL_S           = 18  # S  – Last Month's Projection
+COL_T           = 19  # T  – Total Available Stock (output)
+COL_STOCK       = 20  # U  – Current Stock
+COL_DRR         = 21  # V  – Daily Run Rate (output)
+COL_DOI         = 22  # W  – Days of Inventory (output)
+COL_DEMAND_7D   = 23  # X  – Projected Demand 7d (output)
+COL_DEMAND      = 24  # Y  – Projected Demand 30d (output)
+COL_PROJ_REV    = 25  # Z  – Projected Revenue 30d (output)
+COL_STOCK_STATUS = 26 # AA – Stock Status (output)
+COL_PRIORITY    = 27  # AB – Priority (output)
+COL_REV_CONTRIB = 28  # AC – Revenue Contribution % (output)
+COL_FILL_RATE   = 29  # AD – Fill Rate (output)
+COL_UNITS_FILL  = 30  # AE – Units to be Filled (output)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -343,19 +343,19 @@ def main():
     last_row = DATA_START_ROW + n_rows - 1
 
     ranges = {
-        "M":  multiplier_results,
+        "L":  multiplier_results,
         "R":  bestseller_results,
         "T":  total_stock_results,
-        "U":  drr_results,
-        "V":  doi_results,
-        "W":  demand_7d_results,
-        "X":  demand_results,
-        "Y":  proj_rev_results,
-        "Z":  stock_status_results,
-        "AA": priority_results,
-        "AB": rev_contrib_results,
-        "AC": fill_rate_results,
-        "AD": units_fill_results,
+        "V":  drr_results,
+        "W":  doi_results,
+        "X":  demand_7d_results,
+        "Y":  demand_results,
+        "Z":  proj_rev_results,
+        "AA": stock_status_results,
+        "AB": priority_results,
+        "AC": rev_contrib_results,
+        "AD": fill_rate_results,
+        "AE": units_fill_results,
     }
 
     updates = []

@@ -84,13 +84,16 @@ const PRIORITY_COL         = "AB";  // Priority P0–P3 (output)
 const REV_CONTRIB_COL      = "AC";  // Revenue Contribution %
 const FILL_RATE_COL        = "AD";  // Fill Rate
 const UNITS_TO_FILL_COL    = "AE";  // Units to be Filled = MAX(0, Y − U)
-const NPD_START_DATE_COL   = "AI";  // NPD Start Date — stamped when AE first becomes 1; cleared on expiry
-const KIT_CHILD_FLAG_COL   = "AJ";  // 1 if this SKU is a child component of any kit
+const TOTAL_SOLD_15D_COL   = "AI";  // Total Sold (15D)
+const DRR_15D_COL          = "AJ";  // DRR (15D) = Total Sold 15D / 15
+const NPD_START_DATE_COL   = "AK";  // NPD Start Date — stamped on first NPD; cleared on expiry
+const KIT_CHILD_FLAG_COL   = "AL";  // 1 if this SKU is a child component of any kit
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────
-const D30_AGO_ISO  = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-const D7_AGO_DATE  = new Date(Date.now() -  7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+const D30_AGO_ISO   = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+const D15_AGO_DATE  = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+const D7_AGO_DATE   = new Date(Date.now() -  7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 // ─── Robust SKU matching ─────────────────────────────────────────────────────
 // Splits SKU into parts by dash/space/brackets and matches part-by-part.
@@ -1009,59 +1012,59 @@ async function syncNpdExpiry(token, skuRows) {
   const TODAY   = new Date().toISOString().slice(0, 10);
   const lastRow = skuRows[skuRows.length - 1].row;
 
-  // Ensure col AI (column 35) exists in the main sheet — expand if needed
+  // Ensure col AK (column 37) exists in the D2C sheet — expand if needed
   const metaRes = await withRetry(() => httpsGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}?fields=sheets(properties(sheetId,title,gridProperties))`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}?fields=sheets(properties(sheetId,gridProperties))`,
     { Authorization: `Bearer ${token}` }
   ));
   if (metaRes.statusCode === 200) {
     const sheets    = JSON.parse(metaRes.body).sheets ?? [];
-    const mainSheet = sheets.find(s => s.properties.title === SHEET_TAB);
+    const mainSheet = sheets.find(s => s.properties.sheetId === D2C_TAB_GID);
     const colCount  = mainSheet?.properties?.gridProperties?.columnCount ?? 0;
-    const NEED      = 35; // AI = column 35 (1-based)
+    const NEED      = 38; // AL = column 38 (1-based)
     if (colCount < NEED) {
       await withRetry(() => httpsRequest(
         "POST",
-        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
-        JSON.stringify({ requests: [{ appendDimension: { sheetId: mainSheet.properties.sheetId, dimension: "COLUMNS", length: NEED - colCount } }] }),
+        `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}:batchUpdate`,
+        JSON.stringify({ requests: [{ appendDimension: { sheetId: D2C_TAB_GID, dimension: "COLUMNS", length: NEED - colCount } }] }),
         { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
       ));
-      console.log(`  Expanded main sheet to ${NEED} columns for NPD Start Date col`);
+      console.log(`  Expanded D2C sheet to ${NEED} columns for NPD Start Date col`);
     }
   }
 
-  // Write header for AI1 if blank
+  // Write header for AK1 if blank
   const hdrRes = await withRetry(() => httpsGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(`${SHEET_TAB}!${NPD_START_DATE_COL}1`)}`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!${NPD_START_DATE_COL}1`)}`,
     { Authorization: `Bearer ${token}` }
   ));
   const existingHdr = (JSON.parse(hdrRes.body).values ?? [])[0]?.[0] ?? "";
   if (!existingHdr) {
     await withRetry(() => httpsRequest(
       "POST",
-      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
-      JSON.stringify({ valueInputOption: "RAW", data: [{ range: `${SHEET_TAB}!${NPD_START_DATE_COL}1`, values: [["NPD Start Date"]] }] }),
+      `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
+      JSON.stringify({ valueInputOption: "RAW", data: [{ range: `${D2C_TAB}!${NPD_START_DATE_COL}1`, values: [["NPD Start Date"]] }] }),
       { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
     ));
     console.log(`  Wrote header "NPD Start Date" to ${NPD_START_DATE_COL}1`);
   }
 
-  // Read Q (NPD flag) and AI (NPD Start Date) from main sheet.
-  // If AI doesn't exist yet (400), treat as all blank — writes below will create it.
+  // Read Q (NPD flag) and AK (NPD Start Date) from D2C sheet.
+  // If AK doesn't exist yet (400), treat as all blank — writes below will create it.
   const batchRes = await withRetry(() => httpsGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet` +
-    `?ranges=${encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`)}` +
-    `&ranges=${encodeURIComponent(`${SHEET_TAB}!${NPD_START_DATE_COL}${DATA_START_ROW}:${NPD_START_DATE_COL}${lastRow}`)}`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchGet` +
+    `?ranges=${encodeURIComponent(`${D2C_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`)}` +
+    `&ranges=${encodeURIComponent(`${D2C_TAB}!${NPD_START_DATE_COL}${DATA_START_ROW}:${NPD_START_DATE_COL}${lastRow}`)}`,
     { Authorization: `Bearer ${token}` }
   ));
   let aeVals = [], afVals = [];
   if (batchRes.statusCode === 200) {
     [aeVals, afVals] = (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
   } else if (batchRes.statusCode === 400) {
-    // Col AI not yet in sheet grid — read Q alone so we can still stamp dates
-    console.log(`  Col AI not in grid yet — reading Q only, will stamp dates on first write`);
+    // Col AK not yet in sheet grid — read Q alone so we can still stamp dates
+    console.log(`  Col AK not in grid yet — reading Q only, will stamp dates on first write`);
     const aeOnly = await withRetry(() => httpsGet(
-      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(`${SHEET_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`)}`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!${NPD_FLAG_COL}${DATA_START_ROW}:${NPD_FLAG_COL}${lastRow}`)}`,
       { Authorization: `Bearer ${token}` }
     ));
     aeVals = aeOnly.statusCode === 200 ? (JSON.parse(aeOnly.body).values ?? []) : [];
@@ -1069,7 +1072,7 @@ async function syncNpdExpiry(token, skuRows) {
     throw new Error(`NPD expiry read failed: ${batchRes.statusCode}`);
   }
 
-  const mainUpdates = [];  // writes back to main sheet (AI stamps + Q clears)
+  const mainUpdates = [];  // writes back to D2C sheet (AK stamps + Q clears)
   const expiredSkus = new Set();  // npdPrefix values to remove from allocation sheet
 
   for (const { sku, row } of skuRows) {
@@ -1081,7 +1084,7 @@ async function syncNpdExpiry(token, skuRows) {
 
     if (!af) {
       // First time flagged as NPD — stamp today
-      mainUpdates.push({ range: `${SHEET_TAB}!${NPD_START_DATE_COL}${row}`, values: [[TODAY]] });
+      mainUpdates.push({ range: `${D2C_TAB}!${NPD_START_DATE_COL}${row}`, values: [[TODAY]] });
     } else {
       const added = new Date(af);
       if (!isNaN(added)) {
@@ -1089,9 +1092,9 @@ async function syncNpdExpiry(token, skuRows) {
         threshold.setMonth(threshold.getMonth() + 3);
         if (new Date() >= threshold) {
           expiredSkus.add(npdPrefix(sku));
-          // Clear Q and AI so if user re-adds to NPD sheet the clock resets
-          mainUpdates.push({ range: `${SHEET_TAB}!${NPD_FLAG_COL}${row}`,       values: [[""]] });
-          mainUpdates.push({ range: `${SHEET_TAB}!${NPD_START_DATE_COL}${row}`, values: [[""]] });
+          // Clear Q and AK so if user re-adds to NPD sheet the clock resets
+          mainUpdates.push({ range: `${D2C_TAB}!${NPD_FLAG_COL}${row}`,       values: [[""]] });
+          mainUpdates.push({ range: `${D2C_TAB}!${NPD_START_DATE_COL}${row}`, values: [[""]] });
         }
       }
     }
@@ -1100,7 +1103,7 @@ async function syncNpdExpiry(token, skuRows) {
   if (mainUpdates.length > 0) {
     const wr = await withRetry(() => httpsRequest(
       "POST",
-      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
       JSON.stringify({ valueInputOption: "USER_ENTERED", data: mainUpdates }),
       { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
     ));
@@ -1559,15 +1562,7 @@ async function writeMotherWHStock(token) {
     if (JSON.parse(res.body).error) throw new Error(`AF write chunk ${i} failed: ${res.body}`);
   }
 
-  // 5. Clear old IMPORTRANGE helper cols AI–AK (no longer needed; AG/AH are now 7d columns)
-  await withRetry(() => httpsRequest("POST",
-    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchClear`,
-    JSON.stringify({ ranges: [`${D2C_TAB}!AI1:AK2000`] }),
-    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-  ));
-
   console.log(`  ✓ AF written: ${afData.length} rows — ${kitRows} kit rows (MIN child stock), ${nonKitFound} non-kit matched, ${notFound} not found in source`);
-  console.log(`  ✓ Helper cols AH–AK cleared (direct API read replaces IMPORTRANGE)`);
 }
 
 // ─── 7-day sold + DRR → D2C sheet cols AG / AH ───────────────────────────────
@@ -1582,36 +1577,43 @@ async function write7dColumns(token, salesMap, skuTranslation) {
 
   const agValues = [];
   const ahValues = [];
+  const aiValues = [];  // Total Sold (15d)
+  const ajValues = [];  // DRR (15d)
   let written = 0;
 
   for (const sku of d2cSkus) {
-    if (!sku) { agValues.push([""]); ahValues.push([""]); continue; }
+    if (!sku) { agValues.push([""]); ahValues.push([""]); aiValues.push([""]); ajValues.push([""]); continue; }
 
     const shopifySku = skuTranslation[sku] ?? sku;
     const sales = salesMap[shopifySku] ?? salesMap[normalizeSKU(sku)];
 
     let sold7d = 0;
+    let sold15d = 0;
     if (sales?.dailyUnits) {
       for (const [date, qty] of Object.entries(sales.dailyUnits)) {
-        if (date >= D7_AGO_DATE) sold7d += qty;
+        if (date >= D15_AGO_DATE) sold15d += qty;
+        if (date >= D7_AGO_DATE)  sold7d  += qty;
       }
     }
-    const drr7d = sold7d > 0 ? Math.round((sold7d / 7) * 100) / 100 : 0;
+    const drr7d  = sold7d  > 0 ? Math.round((sold7d  / 7)  * 100) / 100 : 0;
+    const drr15d = sold15d > 0 ? Math.round( sold15d / 15)              : 0;
     agValues.push([sold7d]);
     ahValues.push([drr7d]);
+    aiValues.push([sold15d]);
+    ajValues.push([drr15d]);
     if (sold7d > 0) written++;
   }
 
   const lastRow = d2cSkus.length + 1;
 
-  // Expand sheet to at least 34 columns (AH) if needed — sheet is capped at AF (32) by default
+  // Expand sheet to at least 38 columns (AL) if needed
   const metaRes = await withRetry(() => httpsGet(
     `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}?fields=sheets(properties(sheetId,gridProperties))`,
     { Authorization: `Bearer ${token}` }
   ));
   const d2cSheet = (JSON.parse(metaRes.body).sheets ?? []).find(s => s.properties.sheetId === D2C_TAB_GID);
   const colCount = d2cSheet?.properties?.gridProperties?.columnCount ?? 0;
-  const NEEDED = 34; // through AH
+  const NEEDED = 38; // through AL
   if (colCount < NEEDED) {
     await withRetry(() => httpsRequest("POST",
       `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}:batchUpdate`,
@@ -1626,15 +1628,19 @@ async function write7dColumns(token, salesMap, skuTranslation) {
     JSON.stringify({ valueInputOption: "USER_ENTERED", data: [
       { range: `${D2C_TAB}!AG1`, values: [["Total Sold (7d)"]] },
       { range: `${D2C_TAB}!AH1`, values: [["DRR (7d)"]] },
+      { range: `${D2C_TAB}!AI1`, values: [["Total Sold (15d)"]] },
+      { range: `${D2C_TAB}!AJ1`, values: [["DRR (15d)"]] },
       { range: `${D2C_TAB}!AG2:AG${lastRow}`, values: agValues },
       { range: `${D2C_TAB}!AH2:AH${lastRow}`, values: ahValues },
+      { range: `${D2C_TAB}!AI2:AI${lastRow}`, values: aiValues },
+      { range: `${D2C_TAB}!AJ2:AJ${lastRow}`, values: ajValues },
     ]}),
     { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
   ));
   const writeResult = JSON.parse(writeRes.body);
-  if (writeResult.error) throw new Error(`AG/AH write failed: ${writeRes.body}`);
+  if (writeResult.error) throw new Error(`AG/AH/AI/AJ write failed: ${writeRes.body}`);
 
-  console.log(`  ✓ AG/AH written — ${written} SKUs had 7d sales (window: ${D7_AGO_DATE} → today)`);
+  console.log(`  ✓ AG–AJ written — ${written} SKUs had 7d sales (window: ${D7_AGO_DATE} → today)`);
 }
 
 // ─── Kit Child Flag sync ──────────────────────────────────────────────────────

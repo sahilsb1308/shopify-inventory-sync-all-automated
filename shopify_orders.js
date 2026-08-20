@@ -87,7 +87,7 @@ const UNITS_TO_FILL_COL    = "AE";  // Units to be Filled = MAX(0, Y − U)
 const TOTAL_SOLD_15D_COL   = "AI";  // Total Sold (15D)
 const DRR_15D_COL          = "AJ";  // DRR (15D) = Total Sold 15D / 15
 const NPD_START_DATE_COL   = "AK";  // NPD Start Date — stamped on first NPD; cleared on expiry
-const KIT_CHILD_FLAG_COL   = "AL";  // 1 if this SKU is a child component of any kit
+const KIT_CHILD_FLAG_COL   = "O";   // 1 if this SKU is a child component of any kit (col O header already exists)
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────

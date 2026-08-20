@@ -1613,7 +1613,7 @@ async function write7dColumns(token, salesMap, skuTranslation) {
   ));
   const d2cSheet = (JSON.parse(metaRes.body).sheets ?? []).find(s => s.properties.sheetId === D2C_TAB_GID);
   const colCount = d2cSheet?.properties?.gridProperties?.columnCount ?? 0;
-  const NEEDED = 38; // through AL
+  const NEEDED = 37; // through AK
   if (colCount < NEEDED) {
     await withRetry(() => httpsRequest("POST",
       `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}:batchUpdate`,
@@ -1623,9 +1623,20 @@ async function write7dColumns(token, salesMap, skuTranslation) {
     console.log(`  Expanded sheet from ${colCount} to ${NEEDED} columns`);
   }
 
+  // Force NUMBER format on AI and AJ to prevent date auto-formatting (columns were previously date-typed)
+  await withRetry(() => httpsRequest("POST",
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}:batchUpdate`,
+    JSON.stringify({ requests: [{ repeatCell: {
+      range: { sheetId: D2C_TAB_GID, startRowIndex: 1, endRowIndex: 2000, startColumnIndex: 34, endColumnIndex: 36 },
+      cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0" } } },
+      fields: "userEnteredFormat.numberFormat"
+    }}]}),
+    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  ));
+
   const writeRes = await withRetry(() => httpsRequest("POST",
     `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
-    JSON.stringify({ valueInputOption: "USER_ENTERED", data: [
+    JSON.stringify({ valueInputOption: "RAW", data: [
       { range: `${D2C_TAB}!AG1`, values: [["Total Sold (7d)"]] },
       { range: `${D2C_TAB}!AH1`, values: [["DRR (7d)"]] },
       { range: `${D2C_TAB}!AI1`, values: [["Total Sold (15d)"]] },

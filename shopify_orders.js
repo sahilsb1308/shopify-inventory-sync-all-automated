@@ -1021,7 +1021,7 @@ async function syncNpdExpiry(token, skuRows) {
     const sheets    = JSON.parse(metaRes.body).sheets ?? [];
     const mainSheet = sheets.find(s => s.properties.sheetId === D2C_TAB_GID);
     const colCount  = mainSheet?.properties?.gridProperties?.columnCount ?? 0;
-    const NEED      = 38; // AL = column 38 (1-based)
+    const NEED      = 37; // AK = column 37 (1-based)
     if (colCount < NEED) {
       await withRetry(() => httpsRequest(
         "POST",

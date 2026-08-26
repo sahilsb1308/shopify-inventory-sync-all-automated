@@ -87,6 +87,7 @@ const UNITS_TO_FILL_COL    = "AE";  // Units to be Filled = MAX(0, Y − U)
 const TOTAL_SOLD_15D_COL   = "AI";  // Total Sold (15D)
 const DRR_15D_COL          = "AJ";  // DRR (15D) = Total Sold 15D / 15
 const NPD_START_DATE_COL   = "AK";  // NPD Start Date — stamped on first NPD; cleared on expiry
+const KIT_PARENT_FLAG_COL  = "AL";  // 1 if this SKU is a kit parent (bundle); excluded from mailer
 const KIT_CHILD_FLAG_COL   = "O";   // 1 if this SKU is a child component of any kit (col O header already exists)
 const DATA_START_ROW       = 2;
 
@@ -1021,7 +1022,7 @@ async function syncNpdExpiry(token, skuRows) {
     const sheets    = JSON.parse(metaRes.body).sheets ?? [];
     const mainSheet = sheets.find(s => s.properties.sheetId === D2C_TAB_GID);
     const colCount  = mainSheet?.properties?.gridProperties?.columnCount ?? 0;
-    const NEED      = 37; // AK = column 37 (1-based)
+    const NEED      = 38; // AL = column 38 (1-based)
     if (colCount < NEED) {
       await withRetry(() => httpsRequest(
         "POST",
@@ -1613,7 +1614,7 @@ async function write7dColumns(token, salesMap, skuTranslation) {
   ));
   const d2cSheet = (JSON.parse(metaRes.body).sheets ?? []).find(s => s.properties.sheetId === D2C_TAB_GID);
   const colCount = d2cSheet?.properties?.gridProperties?.columnCount ?? 0;
-  const NEEDED = 37; // through AK
+  const NEEDED = 38; // through AL
   if (colCount < NEEDED) {
     await withRetry(() => httpsRequest("POST",
       `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}:batchUpdate`,
@@ -1703,6 +1704,51 @@ async function syncKitChildFlags(token, childSkuSet) {
   console.log(`  Kit child flag: ${count} SKUs marked as 1, ${updates.length - count} cleared`);
 }
 
+async function syncKitParentFlags(token, kitParentSkus) {
+  const res = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!B1:B`)}`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  if (res.statusCode !== 200) throw new Error(`Kit parent flag read failed: ${res.statusCode}`);
+
+  const rows = JSON.parse(res.body).values ?? [];
+  const data = rows.slice(1);
+
+  // Write header if missing
+  const hdrRes = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!${KIT_PARENT_FLAG_COL}1`)}`,
+    { Authorization: `Bearer ${token}` }
+  ));
+  const existingHdr = (JSON.parse(hdrRes.body).values ?? [])[0]?.[0] ?? "";
+  if (!existingHdr) {
+    await withRetry(() => httpsRequest(
+      "POST",
+      `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
+      JSON.stringify({ valueInputOption: "RAW", data: [{ range: `${D2C_TAB}!${KIT_PARENT_FLAG_COL}1`, values: [["Kit Parent"]] }] }),
+      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    ));
+    console.log(`  Wrote header "Kit Parent" to ${KIT_PARENT_FLAG_COL}1`);
+  }
+
+  const updates = [];
+  data.forEach((row, i) => {
+    const sku    = normalizeSKU(row[0] ?? "");
+    const rowNum = i + 2;
+    const flag   = kitParentSkus.has(sku) ? 1 : "";
+    updates.push({ range: `${D2C_TAB}!${KIT_PARENT_FLAG_COL}${rowNum}`, values: [[flag]] });
+  });
+
+  if (updates.length === 0) return;
+  await withRetry(() => httpsRequest(
+    "POST",
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
+    JSON.stringify({ valueInputOption: "RAW", data: updates }),
+    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  ));
+  const count = updates.filter(u => u.values[0][0] === 1).length;
+  console.log(`  Kit parent flag: ${count} SKUs marked as 1 in ${KIT_PARENT_FLAG_COL}`);
+}
+
 async function main() {
   console.log("═".repeat(58));
   console.log("  Shopify Reports → Google Sheets");
@@ -1783,10 +1829,11 @@ async function main() {
   // Step 7c — read kits sheet (reused by both kit child flag sync and projected demand)
   const { childToKits, kitParentSkus } = await readKitsSheet(token);
 
-  // Step 7d — sync Kit SKU flag (AJ=1 for child SKUs)
-  console.log("\n[7d] Syncing Kit SKU flags (col AJ)...");
+  // Step 7d — sync Kit SKU flag (O=1 for child SKUs, AL=1 for parent/bundle SKUs)
+  console.log("\n[7d] Syncing Kit flags (col O = child, col AL = parent)...");
   const childSkuSet = new Set(Object.keys(childToKits).map(s => s.toUpperCase()));
   await syncKitChildFlags(token, childSkuSet);
+  await syncKitParentFlags(token, kitParentSkus);
 
   // Step 8 — calculate and write projected demand (col X)
   console.log("\n[8/10] Writing projected demand (col X)...");

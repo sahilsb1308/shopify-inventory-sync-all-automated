@@ -1606,7 +1606,7 @@ async function write7dColumns(token, salesMap, skuTranslation) {
 
   const lastRow = d2cSkus.length + 1;
 
-  // Expand sheet to at least 38 columns (AL) if needed
+  // Expand sheet to at least 37 columns (AK) if needed
   const metaRes = await withRetry(() => httpsGet(
     `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}?fields=sheets(properties(sheetId,gridProperties))`,
     { Authorization: `Bearer ${token}` }

@@ -44,7 +44,6 @@ const NPD_FLAG_COL         = "Q";   // Column in Inventory Dashboard to mark NPD
 const D2C_SHEET_ID         = "1ILrx79KdCV1-RDdwQPrrGsGyKe4s2698r3Mwcu9L18M";
 const D2C_TAB              = "Inventory Dashboard";
 const D2C_TAB_GID          = 599219316;
-const D2C_KITS_TAB         = "Kits - Child SKUs";
 const MOTHER_WH_SRC_ID     = "1daV5kSvAf19z0LqZ9PKT2Vbae5rhULmi8qcNUEqAL4I";
 const MOTHER_WH_SRC_TAB    = "Inventory Dashboard";
 const MOTHER_WH_SRC_START  = 5;   // source data starts at row 5
@@ -88,7 +87,6 @@ const UNITS_TO_FILL_COL    = "AE";  // Units to be Filled = MAX(0, Y − U)
 const TOTAL_SOLD_15D_COL   = "AI";  // Total Sold (15D)
 const DRR_15D_COL          = "AJ";  // DRR (15D) = Total Sold 15D / 15
 const NPD_START_DATE_COL   = "AK";  // NPD Start Date — stamped on first NPD; cleared on expiry
-const KIT_PARENT_FLAG_COL  = "O";   // 1 if this SKU is a kit parent (bundle); excluded from mailer (col O header = "Kit SKU")
 const DATA_START_ROW       = 2;
 
 // ─── Date range ──────────────────────────────────────────────────────────────
@@ -1252,37 +1250,8 @@ function demandMultiplier(priority, npdFlag, promoQ, promoR) {
   return Math.max(...candidates);
 }
 
-async function readKitsSheet(token) {
-  // Read col B (parent kit SKU) and col D (child SKU) from Kits sheet in one batchGet
-  const rangeB = encodeURIComponent(`'Kits - Child SKUs'!B2:B500`);
-  const rangeD = encodeURIComponent(`'Kits - Child SKUs'!D2:D500`);
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchGet?ranges=${rangeB}&ranges=${rangeD}`;
 
-  const res = await withRetry(() => httpsGet(url, { Authorization: `Bearer ${token}` }));
-  if (res.statusCode !== 200) throw new Error(`Kits sheet read error ${res.statusCode}: ${res.body}`);
-
-  const [bRange, dRange] = JSON.parse(res.body).valueRanges ?? [];
-  const kitSkus   = (bRange?.values ?? []).map(r => normalizeSKU(r[0] ?? ""));
-  const childSkus = (dRange?.values ?? []).map(r => normalizeSKU(r[0] ?? ""));
-
-  const childToKits   = {};         // childSku → [parentKitSku, ...]
-  const kitParentSkus = new Set();  // exact normalized col-B values from kits sheet
-  const len = Math.max(kitSkus.length, childSkus.length);
-
-  let lastKitSku = "";
-  for (let i = 0; i < len; i++) {
-    // Carry forward last non-empty kit SKU to handle merged cells in col B
-    if (kitSkus[i]) lastKitSku = kitSkus[i];
-    const kitSku   = lastKitSku;
-    const childSku = childSkus[i] ?? "";
-    if (kitSku)             kitParentSkus.add(kitSku);
-    if (kitSku && childSku) (childToKits[childSku] ??= []).push(kitSku);
-  }
-
-  return { childToKits, kitParentSkus };
-}
-
-async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) {
+async function writeProjectedDemand(token, skuRows) {
   const lastRow  = skuRows[skuRows.length - 1].row;
 
   // Batch-read all columns needed for derived calculations
@@ -1303,23 +1272,6 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
 
   const [qVals, uVals, kVals, aeVals, nVals, gVals, iVals, jVals, sVals] =
     (JSON.parse(batchRes.body).valueRanges ?? []).map(vr => vr.values ?? []);
-
-  // Build SKU → K/DRR and prefix → K/DRR lookups for kit DRR contribution
-  const skuToK    = {};
-  const prefixToK = {};
-  const skuToDrr    = {};
-  const prefixToDrr = {};
-  for (const { sku, row } of skuRows) {
-    const i = row - DATA_START_ROW;
-    const k = parseFloat((kVals[i]?.[0] ?? "0").replace(/,/g, "")) || 0;
-    skuToK[sku] = k;
-    const prefix = skuPrefix(sku);
-    if (!(prefix in prefixToK)) prefixToK[prefix] = k;
-    const drrRaw = (uVals[i]?.[0] ?? "").trim();
-    const drrVal = drrRaw === "" ? 0 : (parseFloat(drrRaw) || 0);
-    skuToDrr[sku] = drrVal;
-    if (!(prefix in prefixToDrr)) prefixToDrr[prefix] = drrVal;
-  }
 
   // Pre-compute total N and median N for bestseller + revenue contribution
   const nNonBlank = skuRows
@@ -1359,8 +1311,6 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     const nVal    = nRaw !== "" ? parseFloat(nRaw) || 0 : 0;
     const gVal    = gRaw !== "" ? parseFloat(gRaw) || 0 : 0;
     const sVal    = sRaw !== "" ? parseFloat(sRaw) || 0 : 0;
-    const isChild = sku in childToKits;
-
     // Col R — Bestseller: 1 if M ≥ median of all non-blank M values
     const isBestseller = nRaw !== "" && nVal >= nMedian ? 1 : 0;
     colR[i] = [isBestseller];
@@ -1407,90 +1357,18 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     // Col AA — Stock Status
     colZ[i] = [drr !== null ? calcStockStatus(doiVal) : ""];
 
-    // No DRR and not a kit child → blank demand columns
-    if (drr === null && !isChild) { colW[i] = [""]; colX[i] = [""]; colAD[i] = [""]; continue; }
+    // No DRR → blank demand columns
+    if (drr === null) { colW[i] = [""]; colX[i] = [""]; colAD[i] = [""]; continue; }
 
-    // Kit parent → only W and X are 0; all other columns already computed above
-    const isKitParent = kitParentSkus.has(skuPrefix(sku)) || kitParentSkus.has(sku);
-    if (isKitParent) {
-      colW[i] = [0]; colX[i] = [0];
-      colY[i] = [0]; colAD[i] = [0];
-      continue;
-    }
-
-    // Kit DRR contribution: add the raw DRR of each parent kit so that
-    // effectiveDrr * days * multiplier gives the correct projected demand.
-    const kitDrr = (childToKits[sku] ?? []).reduce((sum, kitSku) => {
-      return sum + (skuToDrr[kitSku] ?? prefixToDrr[skuPrefix(kitSku)] ?? 0);
-    }, 0);
-    const effectiveDrr = (drr ?? 0) + kitDrr;
-    const multiplier   = mScore;
-
-    // For child SKUs with kit DRR: update U, V, Z to reflect effective demand rate
-    if (isChild && kitDrr > 0) {
-      colU[i] = [Math.round(effectiveDrr)];
-      const effDoi = effectiveDrr > 0 ? Math.round(gVal / effectiveDrr) : 0;
-      colV[i] = [effDoi];
-      colZ[i] = [calcStockStatus(effDoi)];
-    }
-
-    const demand7d  = Math.round(effectiveDrr *  7 * multiplier);
-    const demand30d = Math.round(effectiveDrr * 30 * multiplier);
+    const multiplier = mScore;
+    const demand7d   = Math.round(drr *  7 * multiplier);
+    const demand30d = Math.round(drr * 30 * multiplier);
     const asp       = kVal > 0 ? nVal / kVal : 0;
 
     colW[i]  = [demand7d];
     colX[i]  = [demand30d];
     colY[i]  = [parseFloat((demand30d * asp).toFixed(2))];
     colAD[i] = [Math.max(0, parseFloat((demand30d - gVal).toFixed(2)))];
-  }
-
-  // Second pass: promote child SKUs to P0 if any of their parent kits are P0
-  {
-    const skuPriorityMap = new Map();
-    for (const { sku, row } of skuRows) skuPriorityMap.set(sku, colAA[row - DATA_START_ROW][0]);
-
-    const pMap = { P0: 1.5, P1: 1.3, P2: 1.2, P3: 1.1 };
-    let promoted = 0;
-    for (const { sku, row } of skuRows) {
-      const i = row - DATA_START_ROW;
-      if (!(sku in childToKits)) continue;
-      if (colAA[i][0] === "P0") continue;
-
-      const anyParentP0 = (childToKits[sku] ?? []).some(kitSku => {
-        if (skuPriorityMap.get(kitSku) === "P0") return true;
-        const pfx = skuPrefix(kitSku);
-        for (const [s, pri] of skuPriorityMap) if (skuPrefix(s) === pfx && pri === "P0") return true;
-        return false;
-      });
-      if (!anyParentP0) continue;
-
-      colAA[i] = ["P0"];
-      promoted++;
-
-      const { npdFlag, promoQ, isBestseller } = rowState.get(i) ?? {};
-      const newM = Math.max(
-        Number(npdFlag) === 1 ? (Number(promoQ) === 1 ? 5 : 3) : 0,
-        Number(promoQ) === 1  ? 1.5 : 0,
-        isBestseller === 1    ? 1.2 : 0,
-        pMap["P0"],
-      );
-      colM[i] = [newM];
-
-      // Recalculate demand columns with the new multiplier using effective DRR
-      const gVal2  = parseFloat((gVals[i]?.[0] ?? "0")) || 0;
-      const nVal2  = parseFloat((nVals[i]?.[0] ?? "0")) || 0;
-      const kVal2  = parseFloat((kVals[i]?.[0] ?? "0").replace(/,/g, "")) || 0;
-      // Use the effective DRR already written to colU (includes kit contribution)
-      const effDrr2  = parseFloat(colU[i]?.[0] ?? "0") || 0;
-      const demand7d2  = Math.round(effDrr2 *  7 * newM);
-      const demand30d2 = Math.round(effDrr2 * 30 * newM);
-      const asp2       = kVal2 > 0 ? nVal2 / kVal2 : 0;
-      colW[i]  = [demand7d2];
-      colX[i]  = [demand30d2];
-      colY[i]  = [parseFloat((demand30d2 * asp2).toFixed(2))];
-      colAD[i] = [Math.max(0, parseFloat((demand30d2 - gVal2).toFixed(2)))];
-    }
-    if (promoted > 0) console.log(`  ✓ Promoted ${promoted} child SKU(s) to P0 via kit parent (demand recalculated)`);
   }
 
   const make = col => `${SHEET_TAB}!${col}${DATA_START_ROW}:${col}${lastRow}`;
@@ -1517,7 +1395,7 @@ async function writeProjectedDemand(token, skuRows, childToKits, kitParentSkus) 
     )
   );
   if (res.statusCode !== 200) throw new Error(`Derived cols write error ${res.statusCode}: ${res.body}`);
-  console.log(`  ✓ Cols L/R/T/V/W/X/Y/Z/AA/AB/AC/AD/AE written for ${skuRows.length} rows (V = effective DRR for kit children)`);
+  console.log(`  ✓ Cols L/R/T/V/W/X/Y/Z/AA/AB/AC/AD/AE written for ${skuRows.length} rows`);
 }
 
 
@@ -1567,58 +1445,26 @@ async function writeMotherWHStock(token) {
     return null;
   }
 
-  // 2. Read D2C SKUs and kits tab in parallel
-  const [d2cRes, kitsRes] = await Promise.all([
-    withRetry(() => httpsGet(`https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!B2:B2000`)}`, { Authorization: `Bearer ${token}` })),
-    withRetry(() => httpsGet(`https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_KITS_TAB}!B2:D300`)}`, { Authorization: `Bearer ${token}` })),
-  ]);
+  // 2. Read D2C SKUs
+  const d2cRes = await withRetry(() => httpsGet(
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!B2:B2000`)}`,
+    { Authorization: `Bearer ${token}` }
+  ));
   const d2cSkus = (JSON.parse(d2cRes.body).values ?? []).map(r => (r[0] ?? "").trim());
-
-  // Build kitChildren map: parentSku → [childSku, ...]
-  const kitChildren = new Map();
-  let curKit = "";
-  for (const r of (JSON.parse(kitsRes.body).values ?? [])) {
-    const kp = (r[0] ?? "").trim(), ch = (r[2] ?? "").trim();
-    if (kp) curKit = kp;
-    if (curKit && ch) {
-      if (!kitChildren.has(curKit)) kitChildren.set(curKit, []);
-      kitChildren.get(curKit).push(ch);
-    }
-  }
-
-  // Match a D2C SKU to a kit parent — exact normalized match only.
-  // Product variants (SB-417-401) must NOT match the kit parent (SB-417).
-  function matchKitParent(sku) {
-    const u = sku.toUpperCase().trim();
-    for (const kp of kitChildren.keys()) {
-      if (u === kp.toUpperCase().trim()) return kp;
-    }
-    return null;
-  }
 
   // 3. Compute AF value for every D2C row
   const afData = [];
-  let kitRows = 0, nonKitFound = 0, notFound = 0;
+  let found = 0, notFound = 0;
 
   for (let i = 0; i < d2cSkus.length; i++) {
     const sku = d2cSkus[i];
     const row = i + 2;
     if (!sku) { afData.push({ range: `${D2C_TAB}!AF${row}`, values: [[""]] }); continue; }
 
-    const kitParent = matchKitParent(sku);
-    let value;
+    const s = findStock(sku);
+    const value = s !== null ? s : "";
+    if (s !== null) found++; else notFound++;
 
-    if (kitParent) {
-      // Kit row: MIN stock across child SKUs found in source. Blank if none found.
-      const children = kitChildren.get(kitParent) ?? [];
-      const foundStocks = children.map(c => findStock(c)).filter(s => s !== null);
-      value = foundStocks.length > 0 ? Math.min(...foundStocks) : "";
-      kitRows++;
-    } else {
-      const s = findStock(sku);
-      value = s !== null ? s : "";
-      if (s !== null && s > 0) nonKitFound++; else notFound++;
-    }
 
     afData.push({ range: `${D2C_TAB}!AF${row}`, values: [[value]] });
   }
@@ -1640,7 +1486,7 @@ async function writeMotherWHStock(token) {
     if (JSON.parse(res.body).error) throw new Error(`AF write chunk ${i} failed: ${res.body}`);
   }
 
-  console.log(`  ✓ AF written: ${afData.length} rows — ${kitRows} kit rows (MIN child stock), ${nonKitFound} non-kit matched, ${notFound} not found in source`);
+  console.log(`  ✓ AF written: ${afData.length} rows — ${found} matched, ${notFound} not found in source`);
 }
 
 // ─── 7-day sold + DRR → D2C sheet cols AG / AH ───────────────────────────────
@@ -1732,53 +1578,6 @@ async function write7dColumns(token, salesMap, skuTranslation) {
   console.log(`  ✓ AG–AJ written — ${written} SKUs had 7d sales (window: ${D7_AGO_DATE} → today)`);
 }
 
-// ─── Kit Child Flag sync ──────────────────────────────────────────────────────
-// Reads kit parent SKUs from "Kits - Child SKUs"!B:B and sets O=1 in Inventory
-// Dashboard for any row whose SKU (col B) matches a kit parent SKU.
-async function syncKitParentFlags(token, kitParentSkus) {
-  const res = await withRetry(() => httpsGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!B1:B`)}`,
-    { Authorization: `Bearer ${token}` }
-  ));
-  if (res.statusCode !== 200) throw new Error(`Kit parent flag read failed: ${res.statusCode}`);
-
-  const rows = JSON.parse(res.body).values ?? [];
-  const data = rows.slice(1);
-
-  // Ensure header "Kit SKU" in O1
-  const hdrRes = await withRetry(() => httpsGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values/${encodeURIComponent(`${D2C_TAB}!${KIT_PARENT_FLAG_COL}1`)}`,
-    { Authorization: `Bearer ${token}` }
-  ));
-  const existingHdr = (JSON.parse(hdrRes.body).values ?? [])[0]?.[0] ?? "";
-  if (!existingHdr) {
-    await withRetry(() => httpsRequest(
-      "POST",
-      `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
-      JSON.stringify({ valueInputOption: "RAW", data: [{ range: `${D2C_TAB}!${KIT_PARENT_FLAG_COL}1`, values: [["Kit SKU"]] }] }),
-      { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-    ));
-    console.log(`  Wrote header "Kit SKU" to ${KIT_PARENT_FLAG_COL}1`);
-  }
-
-  const updates = [];
-  data.forEach((row, i) => {
-    const sku    = normalizeSKU(row[0] ?? "");
-    const rowNum = i + 2;
-    const flag   = kitParentSkus.has(sku) ? 1 : "";
-    updates.push({ range: `${D2C_TAB}!${KIT_PARENT_FLAG_COL}${rowNum}`, values: [[flag]] });
-  });
-
-  if (updates.length === 0) return;
-  await withRetry(() => httpsRequest(
-    "POST",
-    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
-    JSON.stringify({ valueInputOption: "RAW", data: updates }),
-    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-  ));
-  const count = updates.filter(u => u.values[0][0] === 1).length;
-  console.log(`  Kit SKU flag (col O): ${count} kit parent SKUs marked as 1`);
-}
 
 async function main() {
   console.log("═".repeat(58));
@@ -1855,19 +1654,10 @@ async function main() {
   const focusSkus = await fetchFocusSkus(token);
   await markFocusFlags(token, focusSkus);
 
-  // Step 7c — read kits sheet (reused by both kit child flag sync and projected demand)
-  const { childToKits, kitParentSkus } = await readKitsSheet(token);
-
-  // Step 7d — sync Kit SKU flag (col O = 1 for kit parent/bundle SKUs from Kits!B)
-  console.log("\n[7d] Syncing Kit SKU flag (col O = kit parents)...");
-  await syncKitParentFlags(token, kitParentSkus);
-
   // Step 8 — calculate and write projected demand (col X)
   console.log("\n[8/10] Writing projected demand (col X)...");
-  console.log(`  Kits sheet: ${kitParentSkus.size} kit parent SKUs, ${Object.keys(childToKits).length} child SKUs`);
-  if (kitParentSkus.size > 0) console.log(`  Sample kit parents: ${[...kitParentSkus].slice(0, 5).join(", ")}`);
   const finalSkuRows = await readSheetSKUs(token);
-  await writeProjectedDemand(token, finalSkuRows, childToKits, kitParentSkus);
+  await writeProjectedDemand(token, finalSkuRows);
 
   // Step 9 — write Mother WH inventory to D2C sheet AF column
   console.log("\n[9/10] Writing Mother WH inventory to D2C sheet (col AF)...");

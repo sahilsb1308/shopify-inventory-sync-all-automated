@@ -1293,10 +1293,21 @@ async function writeMotherWHStock(token) {
     afData.push({ range: `${D2C_TAB}!AF${row}`, values: [[value]] });
   }
 
-  // 4. Write AF header + values in chunks
+  // 4. Force NUMBER format on AF (col index 31) to prevent date-serial rendering
+  await withRetry(() => httpsRequest("POST",
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}:batchUpdate`,
+    JSON.stringify({ requests: [{ repeatCell: {
+      range: { sheetId: D2C_TAB_GID, startRowIndex: 1, endRowIndex: 2000, startColumnIndex: 31, endColumnIndex: 32 },
+      cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0" } } },
+      fields: "userEnteredFormat.numberFormat"
+    }}]}),
+    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  ));
+
+  // Write AF header + values in chunks (RAW to avoid date auto-interpretation)
   await withRetry(() => httpsRequest("POST",
     `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
-    JSON.stringify({ valueInputOption: "USER_ENTERED", data: [{ range: `${D2C_TAB}!AF1`, values: [["Mother Warehouse Total Inventory"]] }] }),
+    JSON.stringify({ valueInputOption: "RAW", data: [{ range: `${D2C_TAB}!AF1`, values: [["Mother Warehouse Total Inventory"]] }] }),
     { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
   ));
 
@@ -1304,7 +1315,7 @@ async function writeMotherWHStock(token) {
   for (let i = 0; i < afData.length; i += CHUNK) {
     const res = await withRetry(() => httpsRequest("POST",
       `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
-      JSON.stringify({ valueInputOption: "USER_ENTERED", data: afData.slice(i, i + CHUNK) }),
+      JSON.stringify({ valueInputOption: "RAW", data: afData.slice(i, i + CHUNK) }),
       { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
     ));
     if (JSON.parse(res.body).error) throw new Error(`AF write chunk ${i} failed: ${res.body}`);

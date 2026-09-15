@@ -454,16 +454,18 @@ async function fetchProductsByStatus(status, stockMap, productNameMap) {
 
 async function fetchInventoryReport() {
   const stockMap      = {};
+  const activeOnlyMap = {};
   const productNameMap = {};
 
   // Fetch all three statuses — Shopify only returns active by default
   const active   = await fetchProductsByStatus("active",   stockMap, productNameMap);
+  await fetchProductsByStatus("active", activeOnlyMap, {});
   const archived = await fetchProductsByStatus("archived", stockMap, productNameMap);
   const draft    = await fetchProductsByStatus("draft",    stockMap, productNameMap);
 
   const total = active + archived + draft;
   console.log(`  ✓ ${total} total products (${active} active, ${archived} archived, ${draft} draft) → ${Object.keys(stockMap).length} unique SKUs`);
-  return { stockMap, productNameMap };
+  return { stockMap, activeOnlyMap, productNameMap };
 }
 
 // ─── New-product detection ───────────────────────────────────────────────────
@@ -477,7 +479,7 @@ async function fetchInventoryReport() {
  * These are the products we want to append as new rows so they get
  * updated on every future run.
  */
-function findNewUnmatchedSkus(salesMap, skuTranslation, stockMap) {
+function findNewUnmatchedSkus(salesMap, skuTranslation, activeOnlyMap) {
   // Build the set of Shopify SKUs already mapped to a sheet row
   const coveredShopifySkus = new Set(Object.values(skuTranslation).filter(Boolean));
 
@@ -1615,7 +1617,7 @@ async function main() {
 
   // Step 3 — fetch inventory
   console.log("\n[4/11] Fetching inventory (Month End Inventory Snapshot)...");
-  const { stockMap, productNameMap } = await fetchInventoryReport();
+  const { stockMap, activeOnlyMap, productNameMap } = await fetchInventoryReport();
 
   // Step 4 — build universal SKU translation map for ALL sheet SKUs
   console.log("\n[5/11] Building SKU translation map and writing to sheet...");
@@ -1637,7 +1639,7 @@ async function main() {
 
   // Step 6 — append new rows for SKUs sold in last 3 days but not yet in sheet
   console.log("\n[6/10] Checking for new products sold in last 30 days...");
-  const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation, stockMap);
+  const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation, activeOnlyMap);
   console.log(`  ${newSkus.length === 0 ? "✓ No new unmatched products found." : `⚡ ${newSkus.length} new SKU(s) to append`}`);
   // Re-read the sheet to get the true last row right before appending —
   // guarantees we always append exactly after the last SKU in column B,

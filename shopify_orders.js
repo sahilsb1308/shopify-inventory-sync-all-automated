@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * shopify_orders.js
  *
@@ -1654,6 +1654,18 @@ async function main() {
   console.log("\n[7b] Syncing focus flags from allocation sheet...");
   const focusSkus = await fetchFocusSkus(token);
   await markFocusFlags(token, focusSkus);
+
+  // Step 7c — write Launch Type formula (NPD=1 → "NPD", else "EPD")
+  console.log("\n[7c] Writing Launch Type formula (col N)...");
+  await withRetry(() => httpsRequest(
+    "POST",
+    `https://sheets.googleapis.com/v4/spreadsheets/${D2C_SHEET_ID}/values:batchUpdate`,
+    JSON.stringify({ valueInputOption: "USER_ENTERED", data: [
+      { range: `${D2C_TAB}!N2`, values: [["=ARRAYFORMULA(IF(B2:B2000=\"\",\"\",IF(Q2:Q2000=1,\"NPD\",\"EPD\")))"]]}]
+    }),
+    { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  ));
+  console.log("  ✓ Launch Type formula written");
 
   // Step 8 — calculate and write projected demand (col X)
   console.log("\n[8/10] Writing projected demand (col X)...");

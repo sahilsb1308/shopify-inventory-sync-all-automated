@@ -82,7 +82,6 @@ const PROJ_REV_COL         = "Z";   // Projected Revenue 30d
 const STOCK_STATUS_COL     = "AA";  // Stock Status (output)
 const PRIORITY_COL         = "AB";  // Priority P0–P3 (output)
 const REV_CONTRIB_COL      = "AC";  // Revenue Contribution %
-const FILL_RATE_COL        = "AD";  // Fill Rate
 const UNITS_TO_FILL_COL    = "AE";  // Units to be Filled = MAX(0, Y − U)
 const TOTAL_SOLD_15D_COL   = "AI";  // Total Sold (15D)
 const DRR_15D_COL          = "AJ";  // DRR (15D) = Total Sold 15D / 15
@@ -1293,7 +1292,6 @@ async function writeProjectedDemand(token, skuRows) {
   const colZ  = Array.from({ length: totalRows }, () => [""]);
   const colAA = Array.from({ length: totalRows }, () => ["P3"]);
   const colAB = Array.from({ length: totalRows }, () => [0]);
-  const colAC = Array.from({ length: totalRows }, () => [0]);
   const colAD = Array.from({ length: totalRows }, () => [""]);
   const rowState = new Map(); // i → {npdFlag, promoQ, isBestseller} for second pass
 
@@ -1348,8 +1346,6 @@ async function writeProjectedDemand(token, skuRows) {
     );
     colM[i] = [mScore];
 
-    // Col AD — Fill Rate = (J + U) / S
-    colAC[i] = [sVal > 0 ? parseFloat(((kVal + gVal) / sVal).toFixed(4)) : 0];
 
     // Col W — Days of Inventory = U / DRR
     const doiVal = drr && drr > 0 && gVal > 0 ? Math.round(gVal / drr) : 0;
@@ -1389,14 +1385,13 @@ async function writeProjectedDemand(token, skuRows) {
         { range: make(STOCK_STATUS_COL),  values: colZ  },
         { range: make(PRIORITY_COL),      values: colAA },
         { range: make(REV_CONTRIB_COL),   values: colAB },
-        { range: make(FILL_RATE_COL),     values: colAC },
         { range: make(UNITS_TO_FILL_COL), values: colAD },
       ]}),
       { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
     )
   );
   if (res.statusCode !== 200) throw new Error(`Derived cols write error ${res.statusCode}: ${res.body}`);
-  console.log(`  ✓ Cols L/R/T/V/W/X/Y/Z/AA/AB/AC/AD/AE written for ${skuRows.length} rows`);
+  console.log(`  ✓ Cols L/R/T/V/W/X/Y/Z/AA/AB/AC/AD written for ${skuRows.length} rows`);
 }
 
 

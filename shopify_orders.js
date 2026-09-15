@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+!/usr/bin/env node
 /**
  * shopify_orders.js
  *

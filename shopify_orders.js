@@ -479,7 +479,7 @@ async function fetchInventoryReport() {
  * These are the products we want to append as new rows so they get
  * updated on every future run.
  */
-function findNewUnmatchedSkus(salesMap, skuTranslation, activeOnlyMap) {
+function findNewUnmatchedSkus(salesMap, skuTranslation, activeOnlyMap, productNameMap) {
   // Build the set of Shopify SKUs already mapped to a sheet row
   const coveredShopifySkus = new Set(Object.values(skuTranslation).filter(Boolean));
 
@@ -492,7 +492,10 @@ function findNewUnmatchedSkus(salesMap, skuTranslation, activeOnlyMap) {
       skippedLog.push(sku);
       continue;                                          // already in sheet
     }
-    if (!stockMap[sku]) continue;                        // deleted from Shopify — skip
+    if (!activeOnlyMap[sku]) continue;                        // deleted from Shopify — skip
+    // Block bundle product names — never add duos/trios/kits
+    const productTitle = (productNameMap[sku] || '').toLowerCase();
+    if (productTitle.endsWith(' duo') || productTitle.endsWith(' trio') || productTitle.endsWith(' kit')) continue;
     newSkus.push(sku);
   }
 
@@ -1639,7 +1642,7 @@ async function main() {
 
   // Step 6 — append new rows for SKUs sold in last 3 days but not yet in sheet
   console.log("\n[6/10] Checking for new products sold in last 30 days...");
-  const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation, activeOnlyMap);
+  const newSkus = findNewUnmatchedSkus(salesMap, skuTranslation, activeOnlyMap, productNameMap);
   console.log(`  ${newSkus.length === 0 ? "✓ No new unmatched products found." : `⚡ ${newSkus.length} new SKU(s) to append`}`);
   // Re-read the sheet to get the true last row right before appending —
   // guarantees we always append exactly after the last SKU in column B,

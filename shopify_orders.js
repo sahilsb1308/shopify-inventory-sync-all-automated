@@ -342,7 +342,6 @@ async function refreshShopifyToken() {
   SHOPIFY_ACCESS_TOKEN = newToken;
   console.log("[token] ✓ Shopify token refreshed");
 }
-}
 
 // Normalize SKU for consistent matching.
 // Handles: trailing/leading spaces, spaces around dashes ("SB- PERF" → "SB-PERF"),

@@ -186,7 +186,6 @@ if (!SHOPIFY_ACCESS_TOKEN && !TOKEN_API_KEY) {
   console.error("ERROR: Set SHOPIFY_ACCESS_TOKEN or TOKEN_API_KEY.");
   process.exit(1);
 }
-}
 if (!DRY_RUN && !fs.existsSync(SERVICE_ACCOUNT_FILE)) {
   console.error(`ERROR: ${SERVICE_ACCOUNT_FILE} not found.`);
   process.exit(1);

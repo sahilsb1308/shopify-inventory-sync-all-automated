@@ -337,7 +337,7 @@ async function refreshShopifyToken() {
   });
   if (res.statusCode !== 200) throw new Error(`Token refresh failed (${res.statusCode}): ${res.body}`);
   const data = JSON.parse(res.body);
-  const newToken = data.token || data.access_token || data.accessToken;
+  const newToken = data.token || data.access_token || data.accessToken || (data.data && (data.data.token || data.data.access_token));
   if (!newToken) throw new Error(`Token refresh: unexpected response: ${res.body}`);
   SHOPIFY_ACCESS_TOKEN = newToken;
   console.log("[token] ✓ Shopify token refreshed");

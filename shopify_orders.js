@@ -29,7 +29,8 @@ const crypto = require("crypto");
 
 // ─── Shopify config ──────────────────────────────────────────────────────────
 const SHOPIFY_STORE        = process.env.SHOPIFY_STORE;
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+let SHOPIFY_ACCESS_TOKEN    = process.env.SHOPIFY_ACCESS_TOKEN;
+const TOKEN_API_KEY         = process.env.TOKEN_API_KEY; // pk_live_... key for token refresh
 const API_VERSION          = "2023-10";
 const PAGE_LIMIT           = 250;
 
@@ -177,9 +178,14 @@ const DRY_RUN   = process.argv.includes("--dry-run");
 const FIND_KITS = process.argv.includes("--find-kits");
 
 // ─── Validation ──────────────────────────────────────────────────────────────
-if (!SHOPIFY_STORE || !SHOPIFY_ACCESS_TOKEN) {
-  console.error("ERROR: Set SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN.");
+if (!SHOPIFY_STORE) {
+  console.error("ERROR: Set SHOPIFY_STORE.");
   process.exit(1);
+}
+if (!SHOPIFY_ACCESS_TOKEN && !TOKEN_API_KEY) {
+  console.error("ERROR: Set SHOPIFY_ACCESS_TOKEN or TOKEN_API_KEY.");
+  process.exit(1);
+}
 }
 if (!DRY_RUN && !fs.existsSync(SERVICE_ACCOUNT_FILE)) {
   console.error(`ERROR: ${SERVICE_ACCOUNT_FILE} not found.`);
@@ -316,6 +322,27 @@ function shopifyGet(path, params = "") {
   return withRetry(() =>
     httpsGet(`${base}${path}${params}`, { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN })
   );
+}
+
+async function refreshShopifyToken() {
+  if (!TOKEN_API_KEY) return; // static token in use — nothing to refresh
+  console.log("[token] Refreshing Shopify access token...");
+  const res = await new Promise((resolve, reject) => {
+    const body = JSON.stringify({ scopes: ["read_all_orders","read_products","read_customers","read_inventory"] });
+    const u = new URL("https://backgroundprocessor.swiss-custom.site/api/public/token/generate");
+    const req = https.request({
+      hostname: u.hostname, path: u.pathname, method: "POST",
+      headers: { Authorization: TOKEN_API_KEY, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
+    }, rs => { let d = ""; rs.on("data", c => d += c); rs.on("end", () => resolve({ statusCode: rs.statusCode, body: d })); });
+    req.on("error", reject); req.write(body); req.end();
+  });
+  if (res.statusCode !== 200) throw new Error(`Token refresh failed (${res.statusCode}): ${res.body}`);
+  const data = JSON.parse(res.body);
+  const newToken = data.token || data.access_token || data.accessToken;
+  if (!newToken) throw new Error(`Token refresh: unexpected response: ${res.body}`);
+  SHOPIFY_ACCESS_TOKEN = newToken;
+  console.log("[token] ✓ Shopify token refreshed");
+}
 }
 
 // Normalize SKU for consistent matching.
@@ -1591,6 +1618,7 @@ async function write7dColumns(token, salesMap, skuTranslation) {
 
 
 async function main() {
+  await refreshShopifyToken();
   console.log("═".repeat(58));
   console.log("  Shopify Reports → Google Sheets");
   console.log("═".repeat(58));

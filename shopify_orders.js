@@ -327,7 +327,7 @@ async function refreshShopifyToken() {
   if (!TOKEN_API_KEY) return; // static token in use — nothing to refresh
   console.log("[token] Refreshing Shopify access token...");
   const res = await new Promise((resolve, reject) => {
-    const body = JSON.stringify({ scopes: ["read_all_orders","read_products","read_customers","read_inventory"] });
+    const body = JSON.stringify({ scopes: ["read_orders","read_products","read_customers","read_inventory"] });
     const u = new URL("https://backgroundprocessor.swiss-custom.site/api/public/token/generate");
     const req = https.request({
       hostname: u.hostname, path: u.pathname, method: "POST",

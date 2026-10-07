@@ -141,13 +141,17 @@ def main():
 
     spreadsheet = gc.open_by_key(SHEET_ID)
     dashboard   = spreadsheet.worksheet(DASHBOARD_TAB)
-    kits_sheet  = spreadsheet.worksheet(KITS_TAB)
+
+    try:
+        kits_sheet = spreadsheet.worksheet(KITS_TAB)
+        print("Reading Kits - Child SKUs sheet...")
+        kits_rows = kits_sheet.get_all_values()
+    except Exception:
+        print("No Kits - Child SKUs sheet found, skipping kit logic.")
+        kits_rows = []
 
     print("Reading Inventory Dashboard...")
     dash_rows = dashboard.get_all_values()
-
-    print("Reading Kits - Child SKUs sheet...")
-    kits_rows = kits_sheet.get_all_values()
 
     # ── Parse Kits sheet ──────────────────────────────────────────────────────
     child_to_kits: dict[str, list[str]] = {}

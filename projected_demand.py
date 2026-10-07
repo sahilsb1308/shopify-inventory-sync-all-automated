@@ -291,7 +291,7 @@ def main():
             demand_7d_results.append([0])
             demand_results.append([0])
             proj_rev_results.append([0])
-            fill_rate_results.append([0])
+            fill_rate_results.append(blank)
             continue
 
         # Kit DRR contribution: sum the raw DRR of each parent kit so that

@@ -284,16 +284,6 @@ def main():
             fill_rate_results.append(blank)
             continue
 
-        # Rule 2: kit parent → 0 demand
-        if sku_prefix(norm_sku) in kit_parent_skus or norm_sku in kit_parent_skus:
-            doi_results.append(blank)
-            stock_status_results.append(blank)
-            demand_7d_results.append([0])
-            demand_results.append([0])
-            proj_rev_results.append([0])
-            fill_rate_results.append(blank)
-            continue
-
         # Kit DRR contribution: sum the raw DRR of each parent kit so that
         # effective_drr * days * multiplier gives the correct projected demand.
         kit_drr = sum(
